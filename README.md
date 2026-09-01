@@ -89,7 +89,7 @@ trains the seat to route around the gate instead of respecting it:
 
 ```ts
 const ROUTINE_BY_SEAT: Record<string, RegExp[]> = {
-  "gitmoot-coc": [/(?:^|\s)gh\s+pr\s+merge\b/],
+  "gitmoot-coc": [/(?:^|\s)gh\s+pr\s+merge\b/, /(?:^|\s)git\s+push\b/],
 };
 ```
 
