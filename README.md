@@ -63,17 +63,41 @@ A `:suffix` on the selector sets the thinking level. Accepted values are `inheri
 `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. A role with no entry falls back to
 the session default, so a partial config degrades instead of failing.
 
-## Adapt the trigger to your own prompts
+## Adapt it to your own seats
 
-This shipped as fleet tooling, so the default prompt trigger is specific to it:
+The trigger recognises a routine runbook prompt for any seat and captures the seat name from
+the filename:
 
 ```ts
-const CHECKIN_PROMPT = /(?:^|\s)(?:\/root\/fleet-tools\/)?jarvis-(?:checkin|sweep)\.md\b[\s\S]*\bexecute\b/i;
+const CHECKIN_PROMPT = /(?:^|\s)(?:\/root\/fleet-tools\/)?([a-z0-9]+(?:-[a-z0-9]+)*?)-(?:checkin|sweep)(?:-prompt)?\.md\b[\s\S]*\bexecute\b/i;
 ```
 
-Point it at whatever your own routine prompt looks like. The three pattern lists,
-`INCIDENT_RESULT`, `RISKY_BASH`, and `CHECKIN_PROMPT`, are plain arrays at the top of the
-file and are meant to be edited.
+Matching the pattern is not enough on its own. A seat is routed only if it is listed:
+
+```ts
+const ROUTED_SEATS = new Set(["jarvis", "gitmoot-coc", "apps-coc"]);
+```
+
+That split is deliberate. Generalising the filename pattern would otherwise enrol every seat
+whose runbook happens to be named the same way, silently changing how other people's lanes
+behave. Adding a lane stays a decision.
+
+### Exempting a seat's routine work
+
+A command that a seat runs every ordinary day should not force an escalation. Gating it
+trains the seat to route around the gate instead of respecting it:
+
+```ts
+const ROUTINE_BY_SEAT: Record<string, RegExp[]> = {
+  "gitmoot-coc": [/(?:^|\s)gh\s+pr\s+merge\b/],
+};
+```
+
+Anything not listed stays gated for every seat, so each entry loosens the gate and should be
+narrow enough to justify out loud.
+
+The three pattern lists, `INCIDENT_RESULT`, `RISKY_BASH`, and `CHECKIN_PROMPT`, are plain
+arrays at the top of the file and are meant to be edited.
 
 ## Verify it, do not assume it
 

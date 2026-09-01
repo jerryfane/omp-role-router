@@ -23,7 +23,16 @@ function isThinkingLevel(value: string): value is ThinkingLevel {
   return value in THINKING_LEVELS;
 }
 
-const CHECKIN_PROMPT = /(?:^|\s)(?:\/root\/fleet-tools\/)?jarvis-(?:checkin|sweep)\.md\b[\s\S]*\bexecute\b/i;
+// Matches a routine runbook prompt for any seat and captures the seat name:
+// "<seat>-checkin.md", "<seat>-sweep.md", "<seat>-sweep-prompt.md", with or
+// without the fleet-tools directory prefix. Group 1 is the seat, e.g. "jarvis",
+// "gitmoot-coc", "apps-coc".
+const CHECKIN_PROMPT = /(?:^|\s)(?:\/root\/fleet-tools\/)?([a-z0-9]+(?:-[a-z0-9]+)*?)-(?:checkin|sweep)(?:-prompt)?\.md\b[\s\S]*\bexecute\b/i;
+
+// Seats whose routine runbook prompts are routed. A seat absent from this list
+// is left entirely alone, so adding a lane is an explicit decision rather than a
+// side effect of the pattern above matching its runbook name.
+const ROUTED_SEATS = new Set(["jarvis", "gitmoot-coc", "apps-coc"]);
 const INCIDENT_RESULT = [
   /\bGHOST\b/,
   /\bGUARD-FAIL\b/,
@@ -49,7 +58,17 @@ const RISKY_BASH = [
   /(?:^|\s)npm\s+run\s+build\b/,
 ];
 
-const CHECKIN_POLICY = `This is an automatically routed Jarvis check-in or oversight sweep. Stay on the checkin role for routine observation and unchanged healthy state. Call session_role with role incident before any merge, revert, deploy, destructive action, owner-facing send, authorization conflict, security or credential incident, live blocked pane, corroborated ghost, main-branch failure, conflicting evidence, or repeated inert fix. Once escalated, do not downgrade during this run. Keep healthy check-in output to one or two lines.`;
+// Commands a given seat runs as routine lane work, which therefore must NOT be
+// blocked or force an escalation. Everything not listed here stays gated for
+// every seat. Adding an entry LOOSENS the gate, so keep each one narrow and
+// justified by that seat's normal duties.
+const ROUTINE_BY_SEAT: Record<string, RegExp[]> = {
+  // Owner decision 2026-09-01: a merge is routine coordinator work in this lane
+  // and must not trigger the incident model. git push remains gated.
+  "gitmoot-coc": [/(?:^|\s)gh\s+pr\s+merge\b/],
+};
+
+const CHECKIN_POLICY = `This is an automatically routed check-in or oversight sweep. Stay on the checkin role for routine observation and unchanged healthy state. Call session_role with role incident before any revert, deploy, destructive action, owner-facing send, authorization conflict, security or credential incident, live blocked pane, corroborated ghost, main-branch failure, conflicting evidence, or repeated inert fix. Once escalated, do not downgrade during this run. Keep healthy check-in output to one or two lines.`;
 
 function agentDir(): string {
   return process.env.PI_CODING_AGENT_DIR || join(homedir(), ".omp", "agent");
@@ -123,6 +142,7 @@ function toolText(event: ToolResultEvent): string {
 export default function roleRouter(pi: ExtensionAPI) {
   let currentRole: RoleName = "default";
   let managedRun = false;
+  let managedSeat = "";
 
   async function setRoleToolActive(active: boolean): Promise<void> {
     const activeTools = pi.getActiveTools();
@@ -156,13 +176,20 @@ export default function roleRouter(pi: ExtensionAPI) {
   }
 
   pi.on("before_agent_start", async (event, ctx) => {
-    if (!CHECKIN_PROMPT.test(event.prompt)) {
+    const match = CHECKIN_PROMPT.exec(event.prompt);
+    if (!match) {
+      return;
+    }
+
+    const seat = (match[1] ?? "").toLowerCase();
+    if (!ROUTED_SEATS.has(seat)) {
       return;
     }
 
     managedRun = true;
+    managedSeat = seat;
     try {
-      await activate("checkin", ctx, "Jarvis check-in prompt detected");
+      await activate("checkin", ctx, `routine ${managedSeat || "seat"} runbook prompt detected`);
       await setRoleToolActive(true);
       return { systemPrompt: [...event.systemPrompt, CHECKIN_POLICY] };
     } catch (error) {
@@ -212,6 +239,14 @@ export default function roleRouter(pi: ExtensionAPI) {
       return;
     }
 
+    // This seat's routine lane work is exempt: gating it would force an
+    // escalation on every ordinary day, which trains the seat to route around
+    // the gate rather than respect it.
+    const routine = ROUTINE_BY_SEAT[managedSeat] ?? [];
+    if (routine.some((pattern) => pattern.test(command))) {
+      return;
+    }
+
     try {
       await activate("incident", ctx, "consequential command requires incident review");
       return {
@@ -232,8 +267,9 @@ export default function roleRouter(pi: ExtensionAPI) {
     }
 
     managedRun = false;
+    managedSeat = "";
     try {
-      await activate("default", ctx, "automatic check-in completed");
+      await activate("default", ctx, "routed run completed");
     } catch (error) {
       ctx.ui.notify(`Role router restore failed: ${String(error)}`, "error");
     }
@@ -247,7 +283,7 @@ export default function roleRouter(pi: ExtensionAPI) {
   pi.registerTool({
     name: "session_role",
     label: "Session role",
-    description: "Escalate an automatically routed Jarvis check-in or sweep to the incident model in the same OMP session. Use before consequential action or when the injected routing policy says incident review is required.",
+    description: "Escalate an automatically routed check-in or sweep to the incident model in the same OMP session. Use before consequential action or when the injected routing policy says incident review is required.",
     loadMode: "essential",
     defaultInactive: true,
     approval: "read",
@@ -258,7 +294,7 @@ export default function roleRouter(pi: ExtensionAPI) {
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       if (!managedRun) {
         return {
-          content: [{ type: "text", text: "Rejected: session_role is only available during an automatically routed Jarvis check-in or sweep." }],
+          content: [{ type: "text", text: "Rejected: session_role is only available during an automatically routed check-in or sweep." }],
           details: { role: currentRole, managedRun },
           isError: true,
         };
