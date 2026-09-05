@@ -4,8 +4,23 @@ import { join } from "node:path";
 import { YAML } from "bun";
 import type { ExtensionAPI, ExtensionContext, ToolResultEvent } from "@oh-my-pi/pi-coding-agent";
 
-const ROLE_NAMES = ["default", "checkin", "incident"] as const;
+const ROLE_NAMES = ["default", "checkin", "incident", "fable"] as const;
 type RoleName = (typeof ROLE_NAMES)[number];
+
+// Role names are lowercase by convention; the modelRoles keys in config.yml are
+// not, so the mapping is declared here rather than inferred. resolveSelector
+// looks up the mapped key, never the role name, so a rename on either side is a
+// visible edit to this table instead of a runtime "Missing modelRoles.x".
+const ROLE_CONFIG_KEY: Record<RoleName, string> = {
+  default: "default",
+  checkin: "checkin",
+  incident: "incident",
+  fable: "FABLE",
+};
+
+// Derived so the /role usage text cannot drift from the accepted set.
+const ROLE_USAGE = `/role [${ROLE_NAMES.join("|")}]`;
+
 type ThinkingLevel = "inherit" | "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 const THINKING_LEVELS: Record<ThinkingLevel, true> = {
@@ -96,7 +111,8 @@ function loadModelRoles(): Record<string, string> {
 
 function resolveSelector(role: RoleName): { provider: string; modelId: string; thinking?: ThinkingLevel; selector: string } {
   const roles = loadModelRoles();
-  let selector = roles[role];
+  const configKey = ROLE_CONFIG_KEY[role];
+  let selector = roles[configKey];
   const seen = new Set<string>();
 
   while (typeof selector === "string" && selector.startsWith("@")) {
@@ -109,7 +125,7 @@ function resolveSelector(role: RoleName): { provider: string; modelId: string; t
   }
 
   if (typeof selector !== "string") {
-    throw new Error(`Missing modelRoles.${role} in ${join(agentDir(), "config.yml")}`);
+    throw new Error(`Missing modelRoles.${configKey} in ${join(agentDir(), "config.yml")}`);
   }
 
   const slash = selector.indexOf("/");
@@ -323,7 +339,7 @@ export default function roleRouter(pi: ExtensionAPI) {
   });
 
   pi.registerCommand("role", {
-    description: "Show or manually switch the current OMP model role: /role [default|checkin|incident]",
+    description: `Show or manually switch the current OMP model role: ${ROLE_USAGE}`,
     handler: async (args, ctx) => {
       const requested = args.trim();
       if (!requested) {
@@ -332,7 +348,7 @@ export default function roleRouter(pi: ExtensionAPI) {
         return;
       }
       if (!ROLE_NAMES.some((role) => role === requested)) {
-        ctx.ui.notify("Usage: /role [default|checkin|incident]", "error");
+        ctx.ui.notify(`Usage: ${ROLE_USAGE}`, "error");
         return;
       }
 

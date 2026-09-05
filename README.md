@@ -23,7 +23,18 @@ session, with no restart and no lost context.
    message sends, escalation resolution, `systemctl` restart, stop and disable, `rsync`,
    and `npm run build`.
 4. **Restores the default role** when the routed run ends.
-5. **Offers manual control** through a `session_role` tool and a `/role` command.
+5. **Offers manual control** through a `/role` command, which switches to any of the roles
+   and ends automatic management of the run.
+
+The two surfaces are deliberately not the same size. `/role` is driven by a person and
+reaches every role. The in-session `session_role` tool, which the model itself can call, is
+inactive outside a routed run and accepts only `incident` — an escalation on evidence, never
+a free choice of model. Widening that set is a separate decision from adding a role.
+
+A `/role` switch persists for the rest of the session: the restore to `default` runs at the
+end of a *routed* run only, so a manual switch is not undone for you. That is the intended
+behaviour for a choice a person made, and it is the reason an agent-facing switch would need
+a restore path before it could be allowed.
 
 The direction matters: escalation is one-way for the duration of a run. A turn that has
 already seen something serious does not drift back down to the cheap model.
@@ -57,11 +68,45 @@ modelRoles:
   default: anthropic/claude-opus-5:high
   checkin: openai-codex/gpt-5.6-terra:medium
   incident: openai-codex/gpt-5.6-sol:high
+  FABLE: anthropic/claude-fable-5-1:high
 ```
 
 A `:suffix` on the selector sets the thinking level. Accepted values are `inherit`, `off`,
-`minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. A role with no entry falls back to
-the session default, so a partial config degrades instead of failing.
+`minimal`, `low`, `medium`, `high`, `xhigh`, and `max`.
+
+### Role names and config keys
+
+The role names are `default`, `checkin`, `incident`, and `fable`. The config key each one
+reads is declared in `ROLE_CONFIG_KEY` and is **not** derived from the role name, because a
+key in an existing config may already be spelled differently — `fable` reads `FABLE`:
+
+```ts
+const ROLE_CONFIG_KEY: Record<RoleName, string> = {
+  default: "default",
+  checkin: "checkin",
+  incident: "incident",
+  fable: "FABLE",
+};
+```
+
+Point a role at a differently-spelled key by editing that table rather than by renaming the
+config key, so the mapping stays in the versioned file and a mismatch is a visible edit
+instead of a runtime `Missing modelRoles.<key>`.
+
+A missing key is reported, not silently absorbed: the switch is refused, the model does not
+move, and the notification names the **config key** it looked for. That is a deliberate
+difference from a fallback — a routing extension that quietly kept the current model would
+be indistinguishable from one that never loaded.
+
+A value may point at another key with `@`, resolved before the selector is parsed. YAML
+reserves a leading `@`, so an alias value **must be quoted** — `FABLE: "@ASTRA"` is an
+alias, while `FABLE: @ASTRA` is a YAML parse error:
+
+```yaml
+modelRoles:
+  ASTRA: openai-codex/gpt-6-astra:high
+  FABLE: "@ASTRA"
+```
 
 ## Adapt it to your own seats
 
@@ -115,6 +160,22 @@ Run a control as well: send a prompt that does **not** match the trigger and con
 model does not move. Without the control, a passing test cannot distinguish a working
 router from an extension that never loaded. `/role` with no argument prints the current
 role and whether the run is managed, which separates those two cases directly.
+
+### Automated tests
+
+```sh
+bun test
+```
+
+The suite drives the production entry points — the `before_agent_start` hook and the `/role`
+handler — through a fake `ExtensionAPI` that captures what the extension registers, and it
+points `PI_CODING_AGENT_DIR` at a throwaway `config.yml` so selector resolution runs for
+real. No test calls the internal `activate` or `resolveSelector`; a test that reached inside
+would pass over a router that never routes.
+
+It asserts what each role RESOLVES to, not merely that resolving raised nothing, and it
+includes an unrouted-prompt control. `@oh-my-pi/pi-coding-agent` is not needed to run it:
+the only import from it is type-only.
 
 ## Requirements
 

@@ -1,0 +1,9 @@
+{
+  "name": "omp-role-router",
+  "private": true,
+  "type": "module",
+  "description": "OMP role-router extension",
+  "scripts": {
+    "test": "bun test"
+  }
+}
