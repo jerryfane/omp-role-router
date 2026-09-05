@@ -21,6 +21,28 @@ const ROLE_CONFIG_KEY: Record<RoleName, string> = {
 // Derived so the /role usage text cannot drift from the accepted set.
 const ROLE_USAGE = `/role [${ROLE_NAMES.join("|")}]`;
 
+// Type guard so `requested` narrows to RoleName for the guard and for activate.
+function isRoleName(value: string): value is RoleName {
+  return ROLE_NAMES.some((role) => role === value);
+}
+
+// Roles that may be selected ONLY from an interactive session, because the
+// quota behind them is scarce enough that an unattended switch is a leak.
+// Everything not listed here is selectable wherever /role is.
+const INTERACTIVE_ONLY_ROLES: Partial<Record<RoleName, true>> = {
+  fable: true,
+};
+
+// Provenance for a /role invocation. Measured on omp 18.1.10: the command
+// context reports hasUI true and mode "tui" for a person typing in the
+// composer, and hasUI false with mode "json"/"text" for headless runs, which is
+// where an unattended or agent-driven ingress lands. Written as a presence
+// check so a build that stops reporting the field fails CLOSED rather than
+// treating an unknown ingress as human.
+function isInteractiveSession(ctx: ExtensionContext): boolean {
+  return "hasUI" in ctx && ctx.hasUI === true;
+}
+
 type ThinkingLevel = "inherit" | "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 const THINKING_LEVELS: Record<ThinkingLevel, true> = {
@@ -347,8 +369,15 @@ export default function roleRouter(pi: ExtensionAPI) {
         ctx.ui.notify(`Role router: @${currentRole} (${target.selector}), managed=${managedRun}`, "info");
         return;
       }
-      if (!ROLE_NAMES.some((role) => role === requested)) {
+      if (!isRoleName(requested)) {
         ctx.ui.notify(`Usage: ${ROLE_USAGE}`, "error");
+        return;
+      }
+      if (INTERACTIVE_ONLY_ROLES[requested] && !isInteractiveSession(ctx)) {
+        ctx.ui.notify(
+          `@${requested} can only be selected from an interactive session; this one reports no UI.`,
+          "error",
+        );
         return;
       }
 

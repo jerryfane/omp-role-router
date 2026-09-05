@@ -44,9 +44,17 @@ export type FakePi = {
   };
 };
 
+// How the fake reports the ingress that a /role command arrived on. Measured on
+// omp 18.1.10: a person typing in the composer gets hasUI true and mode "tui";
+// headless runs get hasUI false and mode "json"/"text". "absent" models a build
+// that stops reporting the field at all, which must fail closed.
+export type Provenance = "interactive" | "headless" | "absent";
+
 export type FakeCtx = {
   modelRegistry: { find: (provider: string, modelId: string) => ModelKey | undefined };
   ui: { notify: (message: string, level?: string) => void };
+  hasUI?: boolean;
+  mode?: string;
 };
 
 export type Harness = {
@@ -65,7 +73,7 @@ export type Harness = {
   ctx: FakeCtx;
 };
 
-export function makeHarness(): Harness {
+export function makeHarness(provenance: Provenance = "interactive"): Harness {
   const handlers = new Map<string, HookHandler>();
   const tools = new Map<string, ToolSpec>();
   const commands = new Map<string, RoleCommandSpec>();
@@ -138,6 +146,9 @@ export function makeHarness(): Harness {
           notifications.push({ message, level });
         },
       },
+      ...(provenance === "absent"
+        ? {}
+        : { hasUI: provenance === "interactive", mode: provenance === "interactive" ? "tui" : "json" }),
     },
   };
 

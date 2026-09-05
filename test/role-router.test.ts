@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import roleRouter from "../src/role-router.ts";
-import { type AgentStartResult, type Harness, makeHarness, writeAgentConfig } from "./harness.ts";
+import { type AgentStartResult, type Harness, makeHarness, type Provenance, writeAgentConfig } from "./harness.ts";
 
 const FABLE_SELECTOR = "anthropic/claude-fable-5-1:high";
 const INCIDENT_SELECTOR = "openai-codex/gpt-5.6-sol:high";
@@ -23,9 +23,9 @@ const LIVE_MODELS = [
   "openai-codex/gpt-5.6-terra",
 ];
 
-function boot(modelRoles: Record<string, string>, models: string[]): Harness {
+function boot(modelRoles: Record<string, string>, models: string[], provenance: Provenance = "interactive"): Harness {
   writeAgentConfig(modelRoles);
-  const h = makeHarness();
+  const h = makeHarness(provenance);
   for (const model of models) {
     h.knownModels.add(model);
   }
@@ -116,6 +116,56 @@ describe("/role fable", () => {
       { message: "Usage: /role [default|checkin|incident|fable]", level: "error" },
       { message: "Usage: /role [default|checkin|incident|fable]", level: "error" },
     ]);
+  });
+});
+
+describe("fable is gated on an interactive ingress", () => {
+  test("refuses fable when the session reports no UI, and says why", async () => {
+    const h = boot(LIVE_LIKE_ROLES, LIVE_MODELS, "headless");
+
+    await runRoleCommand(h, "fable");
+
+    expect(h.setModelCalls).toEqual([]);
+    expect(h.notifications).toEqual([
+      {
+        message: "@fable can only be selected from an interactive session; this one reports no UI.",
+        level: "error",
+      },
+    ]);
+  });
+
+  test("fails closed when the context reports no provenance at all", async () => {
+    const h = boot(LIVE_LIKE_ROLES, LIVE_MODELS, "absent");
+
+    await runRoleCommand(h, "fable");
+
+    expect(h.setModelCalls).toEqual([]);
+    expect(h.notifications.map((entry) => entry.level)).toEqual(["error"]);
+  });
+
+  test("does not gate the roles whose quota is not scarce", async () => {
+    const h = boot(LIVE_LIKE_ROLES, LIVE_MODELS, "headless");
+
+    await runRoleCommand(h, "incident");
+    await runRoleCommand(h, "checkin");
+
+    expect(h.setModelCalls).toEqual([
+      { provider: "openai-codex", modelId: "gpt-5.6-sol" },
+      { provider: "openai-codex", modelId: "gpt-5.6-terra" },
+    ]);
+  });
+
+  test("an agent-authored routed run still cannot reach fable even interactively", async () => {
+    const h = boot(LIVE_LIKE_ROLES, LIVE_MODELS);
+
+    await startAgent(h, "read /root/fleet-tools/jarvis-checkin.md and execute it");
+
+    // The automatic path activates checkin and nothing else, whatever the
+    // prompt says: an agent that writes "/role fable" into a task prompt gets
+    // text delivered to a model, not a command.
+    expect(h.setModelCalls).toEqual([{ provider: "openai-codex", modelId: "gpt-5.6-terra" }]);
+    const tool = h.tools.get("session_role");
+    expect(tool?.parameters.shape.role?.values).toEqual(["incident"]);
   });
 });
 

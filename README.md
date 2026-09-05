@@ -23,13 +23,28 @@ session, with no restart and no lost context.
    message sends, escalation resolution, `systemctl` restart, stop and disable, `rsync`,
    and `npm run build`.
 4. **Restores the default role** when the routed run ends.
-5. **Offers manual control** through a `/role` command, which switches to any of the roles
-   and ends automatic management of the run.
+5. **Offers manual control** through a `/role` command, which ends automatic management of
+   the run and switches to any role the ingress is allowed to select.
 
-The two surfaces are deliberately not the same size. `/role` is driven by a person and
-reaches every role. The in-session `session_role` tool, which the model itself can call, is
-inactive outside a routed run and accepts only `incident` — an escalation on evidence, never
-a free choice of model. Widening that set is a separate decision from adding a role.
+The two surfaces are deliberately not the same size. `/role` is driven by a person. The
+in-session `session_role` tool, which the model itself can call, is inactive outside a
+routed run and accepts only `incident` — an escalation on evidence, never a free choice of
+model. Widening that set is a separate decision from adding a role.
+
+### Roles whose quota is scarce are gated on an interactive ingress
+
+`fable` is listed in `INTERACTIVE_ONLY_ROLES` and is refused unless the command context
+reports an interactive session. Measured on omp 18.1.10: a person typing in the composer
+gets `hasUI: true` and `mode: "tui"`; headless runs (`-p`, `--mode=json`) get `hasUI: false`.
+The check is written as a presence test, so a build that stops reporting the field refuses
+rather than treating an unknown ingress as human — it fails **closed**.
+
+This gate is deliberately not load-bearing on the harness staying as it is. On omp 18.1.10
+an agent-attributed task prompt is delivered to the model as text and is never
+slash-command-dispatched, so agent-authored `/role fable` does not switch anything today.
+That is a property of the harness, not of this repository, and an upgrade could change it
+without any test here failing. The gate is what pins the invariant locally;
+`test/provenance-regression.sh` is what proves it against the real binary.
 
 A `/role` switch persists for the rest of the session: the restore to `default` runs at the
 end of a *routed* run only, so a manual switch is not undone for you. That is the intended
@@ -176,6 +191,32 @@ would pass over a router that never routes.
 It asserts what each role RESOLVES to, not merely that resolving raised nothing, and it
 includes an unrouted-prompt control. `@oh-my-pi/pi-coding-agent` is not needed to run it:
 the only import from it is type-only.
+
+### Mutation proof
+
+```sh
+bun test/mutation-proof.ts
+```
+
+A green suite is not evidence unless a broken version of the code turns it red. Each mutant
+is a semantic reversion of `src/role-router.ts` — it breaks the property a guard protects —
+and the harness refuses to report a result unless the anchor was found, the file **on disk**
+changed (sha256 compared), and the original was restored afterwards. A mutation that quietly
+fails to apply otherwise reports a green suite and is indistinguishable from a mutant that
+survived.
+
+### Production-path regression (needs credentials)
+
+```sh
+test/provenance-regression.sh [path-to-extension]
+```
+
+Runs the real `omp` binary, because the fake context in `bun test` cannot prove what the
+runtime reports as provenance. Three cases: a headless run must be refused the gated role
+while an ungated role still switches; an agent-attributed task prompt carrying the command
+text must leave every session off the gated model; and a real pty ingress must be admitted,
+or the gate has simply deleted the feature. It takes the extension path as an argument, so
+running it against a mutated copy is how you check the script itself still fails.
 
 ## Requirements
 
