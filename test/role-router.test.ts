@@ -295,6 +295,24 @@ describe("fable is gated on an interactive ingress", () => {
     }
   });
 
+  // A window past the platform timer limit fires immediately, which would
+  // collapse both the window and the ordering between the two deadlines. An
+  // out-of-range override is ignored rather than honoured.
+  test("ignores an out-of-range acknowledgement window", async () => {
+    for (const hostile of ["999999999999", "0", "-5", "1.5", "NaN", ""]) {
+      process.env.PI_ROLE_ROUTER_ACK_TIMEOUT_MS = hostile;
+      try {
+        const h = boot(LIVE_LIKE_ROLES, LIVE_MODELS);
+
+        await runRoleCommand(h, "fable");
+
+        expect(h.confirmOptions[0]?.timeout).toBe(60_500);
+      } finally {
+        delete process.env.PI_ROLE_ROUTER_ACK_TIMEOUT_MS;
+      }
+    }
+  });
+
   test("denies when the dialog cannot be presented at all", async () => {
     const h = boot(LIVE_LIKE_ROLES, LIVE_MODELS, "interactive", "throws");
 
@@ -430,6 +448,24 @@ describe("a gated activation leaves an attributable record", () => {
 
     expect(h.setModelCalls).toEqual([]);
     expect(h.notifications[0]?.message).toContain("could not be recorded");
+  });
+
+  // A row saying "unknown" would satisfy the mechanism and not the requirement,
+  // so a session the extension cannot name is a refusal.
+  test("refuses the switch when the session cannot be identified", async () => {
+    const dir = writeAgentConfig(LIVE_LIKE_ROLES);
+    const h = makeHarness();
+    for (const model of LIVE_MODELS) {
+      h.knownModels.add(model);
+    }
+    h.ctx.sessionManager = undefined;
+    roleRouter(h.pi as never);
+
+    await runRoleCommand(h, "fable");
+
+    expect(h.setModelCalls).toEqual([]);
+    expect(h.notifications[0]?.message).toContain("could not be recorded");
+    expect(existsSync(join(dir, "role-activations.jsonl"))).toBe(false);
   });
 
   // The dialog names a selector; activating must use THAT one. Re-resolving

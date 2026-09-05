@@ -63,10 +63,23 @@ function isComposerSession(ctx: ExtensionContext): boolean {
 
 // How long silence is allowed to stand before it counts as a refusal. Read per
 // invocation rather than at load so a test can exercise the silence path
-// without waiting a minute; anything unparseable or non-positive keeps 60s.
+// without waiting a minute.
+//
+// Bounded on BOTH sides, and not only for tidiness: a value past the platform
+// timer limit fires immediately, which would collapse the window to nothing and
+// also collapse the ordering between the two deadlines. Anything unparseable,
+// non-integer or outside the range keeps the default.
+const ACKNOWLEDGEMENT_WINDOW_DEFAULT_MS = 60_000;
+const ACKNOWLEDGEMENT_WINDOW_MIN_MS = 10;
+const ACKNOWLEDGEMENT_WINDOW_MAX_MS = 600_000;
+
 function acknowledgementWindowMs(): number {
   const override = Number(process.env.PI_ROLE_ROUTER_ACK_TIMEOUT_MS);
-  return Number.isFinite(override) && override > 0 ? override : 60_000;
+  const usable =
+    Number.isSafeInteger(override) &&
+    override >= ACKNOWLEDGEMENT_WINDOW_MIN_MS &&
+    override <= ACKNOWLEDGEMENT_WINDOW_MAX_MS;
+  return usable ? override : ACKNOWLEDGEMENT_WINDOW_DEFAULT_MS;
 }
 
 // The dialog carries TWO independent deadlines, in the safe direction, because
@@ -122,12 +135,18 @@ async function isAcknowledged(ctx: ExtensionContext, role: RoleName, selector: s
 // is exactly what this is for.
 const ACTIVATION_LOG = "role-activations.jsonl";
 
+// A record that cannot name the session does not satisfy the requirement it
+// exists for, so an unidentifiable session is a REFUSAL rather than a row
+// saying "unknown".
 function sessionIdOf(ctx: ExtensionContext): string {
   const manager = ctx.sessionManager;
   if (manager && typeof manager === "object" && "getSessionId" in manager && typeof manager.getSessionId === "function") {
-    return String(manager.getSessionId());
+    const id = manager.getSessionId();
+    if (typeof id === "string" && id.length > 0) {
+      return id;
+    }
   }
-  return "unknown";
+  throw new Error("the session could not be identified, so the activation would not be attributable");
 }
 
 function recordGatedActivation(ctx: ExtensionContext, role: RoleName, target: RoleTarget): void {

@@ -90,6 +90,13 @@ with no `confirm` denies.
 naming the session id, the timestamp, the selector and the gate that admitted it. The write
 happens **before** the switch and is a precondition: if it fails, the switch is refused,
 because an activation nobody can attribute is exactly what the record exists to prevent.
+That includes a session the extension cannot name — a row saying `unknown` would satisfy the
+mechanism and not the requirement, so it refuses instead.
+
+`PI_ROLE_ROUTER_ACK_TIMEOUT_MS` is bounded on both sides (10ms to 600000ms, integers only)
+and anything outside that keeps the 60s default. Not tidiness: a value past the platform
+timer limit fires immediately, which would collapse the window to nothing and with it the
+ordering between the two deadlines.
 
 **The honest limit, and it is an API limit rather than a design choice.** This proves an
 ingress that *answers*, not a human. The command context exposes `mode` and `hasUI` and

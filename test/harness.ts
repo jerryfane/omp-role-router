@@ -228,18 +228,18 @@ export function makeHarness(provenance: Provenance = "interactive", acknowledgem
                 // is Yes, index 1 is No. "ignoresDefault" models a build that
                 // ignores initialIndex, so its timeout answers Yes.
                 const timeoutAnswer = acknowledgement === "ignoresDefault" ? true : options?.initialIndex !== 1;
-                return await new Promise<boolean>((resolve) => {
-                  const settle = (answer: boolean) => {
-                    h.dialogsOpen -= 1;
-                    resolve(answer);
-                  };
-                  if (honoursSignal && options?.signal) {
-                    options.signal.addEventListener("abort", () => settle(false), { once: true });
-                  }
-                  if (options?.timeout !== undefined) {
-                    setTimeout(() => settle(timeoutAnswer), options.timeout);
-                  }
-                });
+                const { promise, resolve } = Promise.withResolvers<boolean>();
+                const settle = (answer: boolean) => {
+                  h.dialogsOpen -= 1;
+                  resolve(answer);
+                };
+                if (honoursSignal && options?.signal) {
+                  options.signal.addEventListener("abort", () => settle(false), { once: true });
+                }
+                if (options?.timeout !== undefined) {
+                  setTimeout(() => settle(timeoutAnswer), options.timeout);
+                }
+                return await promise;
               },
             }),
       },

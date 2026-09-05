@@ -106,6 +106,16 @@ const MUTANTS: Mutant[] = [
     replace: '            `@${requested} activation record failed (${String(error)}).`,\n            "error",\n          );',
   },
   {
+    name: "M20 record an unidentifiable session as \"unknown\" instead of refusing",
+    find: '  throw new Error("the session could not be identified, so the activation would not be attributable");',
+    replace: '  return "unknown";',
+  },
+  {
+    name: "M21 accept any positive acknowledgement window, however large",
+    find: "  const usable =\n    Number.isSafeInteger(override) &&\n    override >= ACKNOWLEDGEMENT_WINDOW_MIN_MS &&\n    override <= ACKNOWLEDGEMENT_WINDOW_MAX_MS;",
+    replace: "  const usable = Number.isFinite(override) && override > 0;",
+  },
+  {
     name: "M11 fail OPEN when the ui offers no way to acknowledge",
     find: '  if (!("confirm" in ui) || typeof ui.confirm !== "function") {\n    return false;\n  }',
     replace: '  if (!("confirm" in ui) || typeof ui.confirm !== "function") {\n    return true;\n  }',
