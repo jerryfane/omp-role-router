@@ -120,6 +120,16 @@ async function isAcknowledged(ctx: ExtensionContext, role: RoleName, selector: s
     // refusal - never an acknowledgement.
     return false;
   } finally {
+    // No mutant covers this line, by decision (jarvis ruling 119948) rather
+    // than oversight. Omitting it would leave one timer and one AbortController
+    // alive per switch for the length of the window, which costs rolling memory
+    // and can delay process exit - real, but bounded and invisible to behaviour.
+    //
+    // My original argument for the waiver was that the gap could not be tested
+    // without wall-clock time, and the reviewer of d5cbb1a corrected that: a spy
+    // on the timer would prove it deterministically. So the waiver rests on the
+    // cost being small, NOT on the test being impossible. If that trade is ever
+    // revisited, the test is cheap and this comment is the place it was declined.
     clearTimeout(abort);
   }
 }
