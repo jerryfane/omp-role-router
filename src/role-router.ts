@@ -1,11 +1,172 @@
-import { readFileSync } from "node:fs";
+import { appendFileSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { YAML } from "bun";
 import type { ExtensionAPI, ExtensionContext, ToolResultEvent } from "@oh-my-pi/pi-coding-agent";
 
-const ROLE_NAMES = ["default", "checkin", "incident"] as const;
+const ROLE_NAMES = ["default", "checkin", "incident", "fable"] as const;
 type RoleName = (typeof ROLE_NAMES)[number];
+
+// Role names are lowercase by convention; the modelRoles keys in config.yml are
+// not, so the mapping is declared here rather than inferred. resolveSelector
+// looks up the mapped key, never the role name, so a rename on either side is a
+// visible edit to this table instead of a runtime "Missing modelRoles.x".
+const ROLE_CONFIG_KEY: Record<RoleName, string> = {
+  default: "default",
+  checkin: "checkin",
+  incident: "incident",
+  fable: "FABLE",
+};
+
+// Derived so the /role usage text cannot drift from the accepted set.
+const ROLE_USAGE = `/role [${ROLE_NAMES.join("|")}]`;
+
+// Type guard so `requested` narrows to RoleName for the guard and for activate.
+function isRoleName(value: string): value is RoleName {
+  return ROLE_NAMES.some((role) => role === value);
+}
+
+// Roles that may be selected ONLY from an interactive session, because the
+// quota behind them is scarce enough that an unattended switch is a leak.
+// Everything not listed here is selectable wherever /role is.
+const INTERACTIVE_ONLY_ROLES: Partial<Record<RoleName, true>> = {
+  fable: true,
+};
+
+// Ingress checks for a gated role. Both must hold, and both fail CLOSED.
+//
+// (1) The session must be a terminal composer session. Measured on omp 18.1.10:
+//   composer in a terminal  -> hasUI true,  mode "tui"
+//   -p text / --mode=json   -> hasUI false, mode "print"/"json"
+//   --mode=rpc / rpc-ui     -> hasUI TRUE,  mode "rpc"
+// The RPC row is why a UI flag alone is not provenance: an automated client
+// gets a non-no-op UI context, so hasUI is true, and its prompt frames run
+// slash commands. `{"type":"prompt","message":"/role fable"}` over --mode=rpc
+// switched the model before this check required the mode. The mode is an
+// allowlist of ONE and both fields are presence-checked, so an unreported or
+// unrecognised mode - a renamed "tui", a new transport - is refused.
+function isComposerSession(ctx: ExtensionContext): boolean {
+  return "hasUI" in ctx && ctx.hasUI === true && "mode" in ctx && ctx.mode === "tui";
+}
+
+// (2) The switch must be acknowledged at the moment it happens. The mode check
+// alone is not enough: `omp '/role fable'` passes a POSITIONAL message to
+// AgentSession.prompt, which dispatches extension commands, and interactive
+// startup reports mode "tui" - so an unattended pty invocation cleared check
+// (1) and switched the model.
+//
+// HONEST LIMIT: this proves an ingress that ANSWERS, not a human. Automation
+// that injects a keystroke still passes, and nothing the extension can see
+// distinguishes that. It moves the bar from "any pty invocation" to "an ingress
+// that acknowledges within the window", and unattended automation - the actual
+// leak - fails.
+
+// How long silence is allowed to stand before it counts as a refusal. Read per
+// invocation rather than at load so a test can exercise the silence path
+// without waiting a minute.
+//
+// Bounded on BOTH sides, and not only for tidiness: a value past the platform
+// timer limit fires immediately, which would collapse the window to nothing and
+// also collapse the ordering between the two deadlines. Anything unparseable,
+// non-integer or outside the range keeps the default.
+const ACKNOWLEDGEMENT_WINDOW_DEFAULT_MS = 60_000;
+const ACKNOWLEDGEMENT_WINDOW_MIN_MS = 10;
+const ACKNOWLEDGEMENT_WINDOW_MAX_MS = 600_000;
+
+function acknowledgementWindowMs(): number {
+  const override = Number(process.env.PI_ROLE_ROUTER_ACK_TIMEOUT_MS);
+  const usable =
+    Number.isSafeInteger(override) &&
+    override >= ACKNOWLEDGEMENT_WINDOW_MIN_MS &&
+    override <= ACKNOWLEDGEMENT_WINDOW_MAX_MS;
+  return usable ? override : ACKNOWLEDGEMENT_WINDOW_DEFAULT_MS;
+}
+
+// The dialog carries TWO independent deadlines, in the safe direction, because
+// each covers the other's failure mode. Measured on omp 18.1.10, each in its
+// own pty with nobody answering:
+//   { signal }, aborted at 5s         -> false at 5003ms, session still live
+//   { timeout: 5000 }                 -> TRUE  at 5002ms  <- fails OPEN
+//   { timeout: 5, initialIndex: 1 }   -> false at    7ms, session still live
+// So: the built-in timeout answers with the CURSOR POSITION, which is Yes
+// unless initialIndex moves it to No; and `timeout` is in MILLISECONDS, so a
+// value meant as seconds becomes a 5ms window. Bare { timeout } is therefore
+// forbidden here. If a future build ignores initialIndex the abort still
+// denies; if it ignores the signal, the No-defaulted timeout still denies.
+//
+// The abort fires first and the dialog timeout is a grace period behind it, so
+// the two deadlines cannot race for the answer.
+const ACKNOWLEDGEMENT_GRACE_MS = 500;
+
+async function isAcknowledged(ctx: ExtensionContext, role: RoleName, selector: string): Promise<boolean> {
+  const ui = ctx.ui;
+  if (!("confirm" in ui) || typeof ui.confirm !== "function") {
+    return false;
+  }
+
+  const windowMs = acknowledgementWindowMs();
+  const controller = new AbortController();
+  const abort = setTimeout(() => controller.abort(new Error(`@${role} acknowledgement window expired`)), windowMs);
+
+  try {
+    const answer = await ui.confirm(`Switch this session to @${role}?`, `Spends ${selector}. This is the scarce model.`, {
+      timeout: windowMs + ACKNOWLEDGEMENT_GRACE_MS,
+      initialIndex: 1,
+      signal: controller.signal,
+    });
+    return answer === true;
+  } catch {
+    // A dialog that cannot be presented, or an abort surfaced as a throw, is a
+    // refusal - never an acknowledgement.
+    return false;
+  } finally {
+    // Asserted by a timer spy in the suite, not left to inspection: without
+    // this line every switch leaves a timer and an AbortController alive for
+    // the length of the window. An earlier waiver of that test rested on the
+    // gap being unobservable without wall-clock time; it is observable with a
+    // spy, so the waiver was revoked and the test written.
+    clearTimeout(abort);
+  }
+}
+
+// Condition of the ship ruling: a gated activation must leave a durable,
+// attributable trace. The residual case the gate cannot prevent - an ingress
+// that injects a keystroke - is at least ATTRIBUTABLE afterwards, which is the
+// difference between an unexplained burn of the scarce model and a session id
+// you can name.
+//
+// Written BEFORE the switch and treated as a precondition: if the record cannot
+// be written the switch is refused, because an activation nobody can attribute
+// is exactly what this is for.
+const ACTIVATION_LOG = "role-activations.jsonl";
+
+// A record that cannot name the session does not satisfy the requirement it
+// exists for, so an unidentifiable session is a REFUSAL rather than a row
+// saying "unknown".
+function sessionIdOf(ctx: ExtensionContext): string {
+  const manager = ctx.sessionManager;
+  if (manager && typeof manager === "object" && "getSessionId" in manager && typeof manager.getSessionId === "function") {
+    const id = manager.getSessionId();
+    if (typeof id === "string" && id.length > 0) {
+      return id;
+    }
+  }
+  throw new Error("the session could not be identified, so the activation would not be attributable");
+}
+
+function recordGatedActivation(ctx: ExtensionContext, role: RoleName, target: RoleTarget): void {
+  const row = {
+    ts: new Date().toISOString(),
+    event: "gated_role_activated",
+    role,
+    selector: target.selector,
+    gate: "composer_session_plus_acknowledgement",
+    session: sessionIdOf(ctx),
+    pid: process.pid,
+  };
+  appendFileSync(join(agentDir(), ACTIVATION_LOG), `${JSON.stringify(row)}\n`, "utf8");
+}
+
 type ThinkingLevel = "inherit" | "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 const THINKING_LEVELS: Record<ThinkingLevel, true> = {
@@ -94,9 +255,13 @@ function loadModelRoles(): Record<string, string> {
   return roles;
 }
 
-function resolveSelector(role: RoleName): { provider: string; modelId: string; thinking?: ThinkingLevel; selector: string } {
+// A resolved role: the model to switch to plus the selector text it came from.
+type RoleTarget = { provider: string; modelId: string; thinking?: ThinkingLevel; selector: string };
+
+function resolveSelector(role: RoleName): RoleTarget {
   const roles = loadModelRoles();
-  let selector = roles[role];
+  const configKey = ROLE_CONFIG_KEY[role];
+  let selector = roles[configKey];
   const seen = new Set<string>();
 
   while (typeof selector === "string" && selector.startsWith("@")) {
@@ -109,7 +274,7 @@ function resolveSelector(role: RoleName): { provider: string; modelId: string; t
   }
 
   if (typeof selector !== "string") {
-    throw new Error(`Missing modelRoles.${role} in ${join(agentDir(), "config.yml")}`);
+    throw new Error(`Missing modelRoles.${configKey} in ${join(agentDir(), "config.yml")}`);
   }
 
   const slash = selector.indexOf("/");
@@ -155,8 +320,12 @@ export default function roleRouter(pi: ExtensionAPI) {
     );
   }
 
-  async function activate(role: RoleName, ctx: ExtensionContext, reason: string): Promise<string> {
-    const target = resolveSelector(role);
+  // The target may be supplied by a caller that already resolved it. That is not
+  // an optimisation: an acknowledgement names a selector, and re-reading
+  // config.yml here would let an edit during the dialog activate a DIFFERENT
+  // model than the one that was acknowledged.
+  async function activate(role: RoleName, ctx: ExtensionContext, reason: string, resolved?: RoleTarget): Promise<string> {
+    const target = resolved ?? resolveSelector(role);
     const model = ctx.modelRegistry.find(target.provider, target.modelId);
     if (!model) {
       throw new Error(`Model not found for @${role}: ${target.provider}/${target.modelId}`);
@@ -323,7 +492,7 @@ export default function roleRouter(pi: ExtensionAPI) {
   });
 
   pi.registerCommand("role", {
-    description: "Show or manually switch the current OMP model role: /role [default|checkin|incident]",
+    description: `Show or manually switch the current OMP model role: ${ROLE_USAGE}`,
     handler: async (args, ctx) => {
       const requested = args.trim();
       if (!requested) {
@@ -331,9 +500,45 @@ export default function roleRouter(pi: ExtensionAPI) {
         ctx.ui.notify(`Role router: @${currentRole} (${target.selector}), managed=${managedRun}`, "info");
         return;
       }
-      if (!ROLE_NAMES.some((role) => role === requested)) {
-        ctx.ui.notify("Usage: /role [default|checkin|incident]", "error");
+      if (!isRoleName(requested)) {
+        ctx.ui.notify(`Usage: ${ROLE_USAGE}`, "error");
         return;
+      }
+      // Resolved ONCE here, then carried through the acknowledgement, the
+      // record and the activation. Re-resolving after the dialog would let an
+      // edit during the window switch to a model the human never saw.
+      let acknowledged: RoleTarget | undefined;
+      if (INTERACTIVE_ONLY_ROLES[requested]) {
+        if (!isComposerSession(ctx)) {
+          ctx.ui.notify(
+            `@${requested} can only be selected from an interactive terminal session; this ingress is not one.`,
+            "error",
+          );
+          return;
+        }
+        // Resolved before the dialog so a misconfigured role fails without
+        // presenting one, and so the dialog can name the model being spent.
+        let target: RoleTarget;
+        try {
+          target = resolveSelector(requested);
+        } catch (error) {
+          ctx.ui.notify(`Role router failed: ${String(error)}`, "error");
+          return;
+        }
+        if (!(await isAcknowledged(ctx, requested, target.selector))) {
+          ctx.ui.notify(`@${requested} not activated: the switch was not acknowledged.`, "error");
+          return;
+        }
+        try {
+          recordGatedActivation(ctx, requested, target);
+        } catch (error) {
+          ctx.ui.notify(
+            `@${requested} not activated: the activation could not be recorded (${String(error)}).`,
+            "error",
+          );
+          return;
+        }
+        acknowledged = target;
       }
 
       managedRun = false;
@@ -343,7 +548,7 @@ export default function roleRouter(pi: ExtensionAPI) {
         ctx.ui.notify(`Role router tool cleanup failed: ${String(error)}`, "error");
       }
       try {
-        await activate(requested, ctx, "manual /role command");
+        await activate(requested, ctx, "manual /role command", acknowledged);
       } catch (error) {
         ctx.ui.notify(`Role router failed: ${String(error)}`, "error");
       }

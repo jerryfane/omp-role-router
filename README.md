@@ -23,7 +23,102 @@ session, with no restart and no lost context.
    message sends, escalation resolution, `systemctl` restart, stop and disable, `rsync`,
    and `npm run build`.
 4. **Restores the default role** when the routed run ends.
-5. **Offers manual control** through a `session_role` tool and a `/role` command.
+5. **Offers manual control** through a `/role` command, which ends automatic management of
+   the run and switches to any role the ingress is allowed to select.
+
+The two surfaces are deliberately not the same size. `/role` is driven by a person. The
+in-session `session_role` tool, which the model itself can call, is inactive outside a
+routed run and accepts only `incident` — an escalation on evidence, never a free choice of
+model. Widening that set is a separate decision from adding a role.
+
+### Roles whose quota is scarce are gated on an interactive ingress
+
+`fable` is listed in `INTERACTIVE_ONLY_ROLES`. Selecting a listed role requires **two**
+things, and both fail closed.
+
+**1. A terminal composer session.** Measured on omp 18.1.10:
+
+| ingress | `hasUI` | `mode` | mode check |
+| --- | --- | --- | --- |
+| composer in a terminal | `true` | `"tui"` | passes |
+| `-p` (text output) | `false` | `"print"` | refused |
+| `--mode=json` | `false` | `"json"` | refused |
+| `--mode=rpc`, `--mode=rpc-ui` | **`true`** | `"rpc"` | refused |
+
+The RPC row is why a UI flag alone is not provenance: an automated client gets a real
+(non-no-op) UI context, so `hasUI` is `true`, and its prompt frames **do** execute slash
+commands. With the gate checking only `hasUI`, `{"type":"prompt","message":"/role fable"}`
+over `--mode=rpc` switched the model. The mode is therefore an allowlist of exactly one
+value and both fields are presence-checked: a renamed `"tui"`, a new transport, or a build
+that stops reporting either field is refused.
+
+**2. An acknowledgement at the moment of the switch,** via `ctx.ui.confirm`, naming the
+selector being spent. The mode check alone is not enough: `omp '/role fable'` passes a
+**positional** message to `AgentSession.prompt`, which dispatches extension commands, and
+interactive startup reports `mode: "tui"` — so an unattended pty invocation cleared check 1
+and switched the model (reproduced on 18.1.10 in a scripted pty with no keystrokes).
+
+The dialog carries **two independent deadlines**, and neither is optional. Measured on
+18.1.10, each in its own pty with nobody answering:
+
+| options | result | session afterwards |
+| --- | --- | --- |
+| `{ signal }`, aborted at 5s | `false` at 5003ms | still accepts commands |
+| `{ timeout: 5000 }` | **`true`** at 5002ms | still accepts commands |
+| `{ timeout: 5, initialIndex: 1 }` | `false` at 7ms | still accepts commands |
+| neither | never resolves | **wedged** |
+
+So the built-in timeout answers with the **cursor position** — Yes unless `initialIndex`
+moves it to No — and `timeout` is in **milliseconds**, which makes a value meant as seconds
+a 5ms window. A bare `{ timeout }` is therefore forbidden here. The switch passes
+`{ timeout, initialIndex: 1, signal }` in one call: if a build ignores `initialIndex` the
+abort still denies, and if it ignores `signal` the No-defaulted timeout still denies. The
+abort fires first and the dialog deadline sits a grace period behind it, so the two cannot
+race for the answer. The window is 60s, overridable with `PI_ROLE_ROUTER_ACK_TIMEOUT_MS`.
+
+The last row is why this is not a detail. An earlier version awaited the dialog with no
+deadline of its own, raced against a timer: it printed a refusal and left the selector
+presented, and a following `/role incident` **never ran**. A refusal that strands the
+session is not a safe failure, and `test/provenance-regression.sh` now asserts the next
+command still executes.
+
+Because the cursor starts on No, **Enter alone denies**; acknowledging takes an explicit
+keystroke (measured: Up then Enter admits). A `confirm` that throws denies, and a `ctx.ui`
+with no `confirm` denies.
+
+**Every gated activation is recorded** to `role-activations.jsonl` in the agent directory,
+naming the session id, the timestamp, the selector and the gate that admitted it. The write
+happens **before** the switch and is a precondition: if it fails, the switch is refused,
+because an activation nobody can attribute is exactly what the record exists to prevent.
+That includes a session the extension cannot name — a row saying `unknown` would satisfy the
+mechanism and not the requirement, so it refuses instead.
+
+`PI_ROLE_ROUTER_ACK_TIMEOUT_MS` is bounded on both sides (10ms to 600000ms, integers only)
+and anything outside that keeps the 60s default. Not tidiness: a value past the platform
+timer limit fires immediately, which would collapse the window to nothing and with it the
+ordering between the two deadlines.
+
+**The honest limit, and it is an API limit rather than a design choice.** This proves an
+ingress that *answers*, not a human. The command context exposes `mode` and `hasUI` and
+nothing about the submitter; `ctx.ui` exposes `onTerminalInput`, but a scripted pty produces
+real terminal input too. At this API there is no signal that separates fingers from a
+script, so **automation that injects a keystroke still passes**. What the gate removes is the
+**unattended** case, which is the actual leak. It is not "human-selectable": it is a
+terminal composer session plus an answered dialog inside a bounded window, and the residual
+is deliberate keystroke injection.
+
+Neither check is load-bearing on the harness staying as it is. On omp 18.1.10 an
+agent-attributed *task* prompt is delivered to the model as text and is never
+slash-command-dispatched, so agent-authored `/role fable` switches nothing today. That is a
+property of the harness, not of this repository, and an upgrade could change it with no test
+here failing. The gate pins the invariant locally; `test/provenance-regression.sh` proves it
+against the real binary.
+
+A `/role` switch is not undone for you at the end of the turn: the restore to `default` runs
+at the end of a *routed* run only. It does not survive unconditionally either — a later
+prompt that matches the routing trigger activates `checkin` regardless of the manual choice.
+That is the intended behaviour for a choice a person made, and it is the reason an
+agent-facing switch would need a restore path before it could be allowed.
 
 The direction matters: escalation is one-way for the duration of a run. A turn that has
 already seen something serious does not drift back down to the cheap model.
@@ -57,11 +152,45 @@ modelRoles:
   default: anthropic/claude-opus-5:high
   checkin: openai-codex/gpt-5.6-terra:medium
   incident: openai-codex/gpt-5.6-sol:high
+  FABLE: anthropic/claude-fable-5-1:high
 ```
 
 A `:suffix` on the selector sets the thinking level. Accepted values are `inherit`, `off`,
-`minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. A role with no entry falls back to
-the session default, so a partial config degrades instead of failing.
+`minimal`, `low`, `medium`, `high`, `xhigh`, and `max`.
+
+### Role names and config keys
+
+The role names are `default`, `checkin`, `incident`, and `fable`. The config key each one
+reads is declared in `ROLE_CONFIG_KEY` and is **not** derived from the role name, because a
+key in an existing config may already be spelled differently — `fable` reads `FABLE`:
+
+```ts
+const ROLE_CONFIG_KEY: Record<RoleName, string> = {
+  default: "default",
+  checkin: "checkin",
+  incident: "incident",
+  fable: "FABLE",
+};
+```
+
+Point a role at a differently-spelled key by editing that table rather than by renaming the
+config key, so the mapping stays in the versioned file and a mismatch is a visible edit
+instead of a runtime `Missing modelRoles.<key>`.
+
+A missing key is reported, not silently absorbed: the switch is refused, the model does not
+move, and the notification names the **config key** it looked for. That is a deliberate
+difference from a fallback — a routing extension that quietly kept the current model would
+be indistinguishable from one that never loaded.
+
+A value may point at another key with `@`, resolved before the selector is parsed. YAML
+reserves a leading `@`, so an alias value **must be quoted** — `FABLE: "@ASTRA"` is an
+alias, while `FABLE: @ASTRA` is a YAML parse error:
+
+```yaml
+modelRoles:
+  ASTRA: openai-codex/gpt-6-astra:high
+  FABLE: "@ASTRA"
+```
 
 ## Adapt it to your own seats
 
@@ -115,6 +244,65 @@ Run a control as well: send a prompt that does **not** match the trigger and con
 model does not move. Without the control, a passing test cannot distinguish a working
 router from an extension that never loaded. `/role` with no argument prints the current
 role and whether the run is managed, which separates those two cases directly.
+
+### Automated tests
+
+```sh
+bun test
+```
+
+The suite drives the production entry points — the `before_agent_start` hook and the `/role`
+handler — through a fake `ExtensionAPI` that captures what the extension registers, and it
+points `PI_CODING_AGENT_DIR` at a throwaway `config.yml` so selector resolution runs for
+real. No test calls the internal `activate` or `resolveSelector`; a test that reached inside
+would pass over a router that never routes.
+
+It asserts what each role RESOLVES to, not merely that resolving raised nothing, and it
+includes an unrouted-prompt control. `@oh-my-pi/pi-coding-agent` is not needed to run it:
+the only import from it is type-only.
+
+### Mutation proof
+
+```sh
+bun test/mutation-proof.ts
+```
+
+A green suite is not evidence unless a broken version of the code turns it red. Each mutant
+is a semantic reversion of `src/role-router.ts` — it breaks the property a guard protects —
+and the harness refuses to report a result unless the anchor was found, the file **on disk**
+changed (sha256 compared), and the original was restored afterwards. A mutation that quietly
+fails to apply otherwise reports a green suite and is indistinguishable from a mutant that
+survived.
+
+### Production-path regression (needs credentials)
+
+```sh
+test/provenance-regression.sh [path-to-extension]
+```
+
+Runs the real `omp` binary, because the fake context in `bun test` cannot prove what the
+runtime reports as provenance. Five cases:
+
+1. **headless** — the gated role is refused while an ungated role still switches (the
+   control: without it, "no switch" and "the extension never loaded" look identical).
+2. **agent-attributed task prompt** — characterises the harness rather than testing the
+   guard. It asserts a child really received the literal command text, agent-attributed,
+   that no session switched, and — as a positive control — that a task child does inherit
+   this extension and fire its hook, so the zero is not the result of broken child loading.
+   It passes with the gate removed, and exists to fail loudly if an omp upgrade ever starts
+   dispatching that text.
+3. **interactive pty, acknowledged** — a real terminal answering the confirmation must be
+   admitted, or the gate has deleted the feature rather than secured it.
+4. **unattended positional CLI message** — `omp '/role fable'` in a pty with nobody
+   answering. This is the ingress that defeated the mode check on its own, and it also
+   carries the **liveness** assertion: after the refusal a following `/role incident` must
+   still execute. An earlier gate printed the refusal and left the session wedged, which no
+   amount of asserting the refusal could see.
+5. **automated rpc** — the ingress that broke a UI-flag-only gate; refused now, with an
+   ungated-role control proving the frame reaches the handler at all.
+
+It takes the extension path as an argument, so running it against a mutated copy is how you
+check the script itself still fails. With the gate removed, cases 1, 4 and 5 all fail.
 
 ## Requirements
 
