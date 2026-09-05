@@ -33,23 +33,37 @@ model. Widening that set is a separate decision from adding a role.
 
 ### Roles whose quota is scarce are gated on an interactive ingress
 
-`fable` is listed in `INTERACTIVE_ONLY_ROLES` and is refused unless the command context
-reports a terminal composer session. Measured on omp 18.1.10:
+`fable` is listed in `INTERACTIVE_ONLY_ROLES`. Selecting a listed role requires **two**
+things, and both fail closed.
 
-| ingress | `hasUI` | `mode` | gated role |
+**1. A terminal composer session.** Measured on omp 18.1.10:
+
+| ingress | `hasUI` | `mode` | mode check |
 | --- | --- | --- | --- |
-| composer in a terminal | `true` | `"tui"` | allowed |
-| `-p` / `--mode=json` | `false` | `"json"` | refused |
+| composer in a terminal | `true` | `"tui"` | passes |
+| `-p` (text output) | `false` | `"print"` | refused |
+| `--mode=json` | `false` | `"json"` | refused |
 | `--mode=rpc`, `--mode=rpc-ui` | **`true`** | `"rpc"` | refused |
 
 The RPC row is why a UI flag alone is not provenance: an automated client gets a real
 (non-no-op) UI context, so `hasUI` is `true`, and its prompt frames **do** execute slash
 commands. With the gate checking only `hasUI`, `{"type":"prompt","message":"/role fable"}`
-over `--mode=rpc` switched the model. So the mode is an allowlist of exactly one value, and
-both fields are presence-checked: an unreported or unrecognised mode is refused. A build
-that renames `"tui"`, adds a transport, or stops reporting either field fails **closed**.
+over `--mode=rpc` switched the model. The mode is therefore an allowlist of exactly one
+value and both fields are presence-checked: a renamed `"tui"`, a new transport, or a build
+that stops reporting either field is refused.
 
-The gate is deliberately not load-bearing on the harness staying as it is. On omp 18.1.10 an
+**2. An acknowledgement at the moment of the switch,** via `ctx.ui.confirm`, naming the
+selector being spent. The mode check alone is not enough: `omp '/role fable'` passes a
+**positional** message to `AgentSession.prompt`, which dispatches extension commands, and
+interactive startup reports `mode: "tui"` — so an unattended pty invocation cleared check 1
+and switched the model. Measured: unanswered, `confirm` resolves `false`; a keystroke
+resolves `true`. A build with no `confirm` on `ctx.ui` is refused.
+
+**The honest limit.** This proves an ingress that *answers*, not a human. Automation that
+injects a keystroke still passes, and nothing visible to an extension distinguishes it. What
+it removes is the unattended case, which is the actual leak.
+
+Neither check is load-bearing on the harness staying as it is. On omp 18.1.10 an
 agent-attributed *task* prompt is delivered to the model as text and is never
 slash-command-dispatched, so agent-authored `/role fable` switches nothing today. That is a
 property of the harness, not of this repository, and an upgrade could change it with no test
@@ -223,21 +237,25 @@ test/provenance-regression.sh [path-to-extension]
 ```
 
 Runs the real `omp` binary, because the fake context in `bun test` cannot prove what the
-runtime reports as provenance. Four cases:
+runtime reports as provenance. Five cases:
 
 1. **headless** — the gated role is refused while an ungated role still switches (the
    control: without it, "no switch" and "the extension never loaded" look identical).
 2. **agent-attributed task prompt** — characterises the harness rather than testing the
    guard. It asserts a child really received the literal command text, agent-attributed,
-   and that no session switched. It passes with the gate removed, and exists to fail loudly
-   if an omp upgrade ever starts dispatching that text.
-3. **interactive pty** — a real terminal must be admitted, or the gate has deleted the
-   feature rather than secured it.
-4. **automated rpc** — the ingress that broke a UI-flag-only gate; refused now, with an
+   that no session switched, and — as a positive control — that a task child does inherit
+   this extension and fire its hook, so the zero is not the result of broken child loading.
+   It passes with the gate removed, and exists to fail loudly if an omp upgrade ever starts
+   dispatching that text.
+3. **interactive pty, acknowledged** — a real terminal answering the confirmation must be
+   admitted, or the gate has deleted the feature rather than secured it.
+4. **unattended positional CLI message** — `omp '/role fable'` in a pty with nobody
+   answering. This is the ingress that defeated the mode check on its own.
+5. **automated rpc** — the ingress that broke a UI-flag-only gate; refused now, with an
    ungated-role control proving the frame reaches the handler at all.
 
 It takes the extension path as an argument, so running it against a mutated copy is how you
-check the script itself still fails. With the gate removed, cases 1 and 4 both fail.
+check the script itself still fails. With the gate removed, cases 1, 4 and 5 all fail.
 
 ## Requirements
 

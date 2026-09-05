@@ -82,24 +82,63 @@ fable_switches=$(find "$WORK/agent" -name '*.jsonl' -exec sh -c \
   'jq -rc "select(.type==\"model_change\")|.model" "$1" 2>/dev/null' _ {} \; | grep -c 'claude-fable')
 check "no session switched to the scarce model" 0 "$fable_switches"
 
+# Positive child-side control: prove a task child really does inherit and run
+# this extension, otherwise the zero above also holds when child extension
+# loading is broken and the case is vacuous. The trigger text is placed in a
+# FILE so the parent prompt cannot match it, which is what makes a match in the
+# child attributable to the child's own hook.
+printf 'read /root/fleet-tools/apps-coc-sweep.md and execute it\n' >"$WORK/child-task.txt"
+mkdir -p "$WORK/inherit"
+timeout 300 omp --no-extensions -e "$EXT" --session-dir="$WORK/inherit" --mode=json \
+  -p "Read the file $WORK/child-task.txt and call the task tool exactly once with a single item whose task text is exactly the contents of that file. Then reply DONE." \
+  >"$WORK/inherit.out" 2>&1
+child_routed=$(find "$WORK/inherit" -mindepth 2 -name '*.jsonl' -exec sh -c \
+  'jq -rc "select(.type==\"model_change\")|.model" "$1" 2>/dev/null' _ {} \; | grep -c 'gpt-5.6-terra')
+if [ "$child_routed" -ge 1 ]; then
+  echo "  ok   a task child inherited this extension and its hook fired ($child_routed routed switch(es))"
+else
+  echo "  FAIL no child routed; child extension loading is broken, so the no-switch result above proves nothing"
+  fails=$((fails + 1))
+fi
+
 # Case 3: a real terminal ingress must be admitted, or the gate has simply
 # removed the feature. Driven through a pty because that is what makes the
-# runtime report an interactive session.
-echo "case 3: interactive pty ingress"
+# runtime report an interactive session, and the extra Enter is the
+# acknowledgement the gate now requires.
+echo "case 3: interactive pty ingress, acknowledged"
 (
   sleep 8
   printf '/role fable\r'
-  sleep 5
+  sleep 4
+  printf '\r'
+  sleep 4
   printf '\x03'
   sleep 1
   printf '\x03'
   sleep 2
-) | timeout 90 script -qec "omp --no-extensions -e $EXT --no-session --cwd $WORK" /dev/null \
+) | timeout 120 script -qec "omp --no-extensions -e $EXT --no-session --cwd $WORK" /dev/null \
   >"$WORK/tty.log" 2>&1
 admitted=$(tr -d '\000' <"$WORK/tty.log" | grep -ac 'Role router: @fable')
-check "interactive /role fable is admitted" 1 "$admitted"
+check "interactive acknowledged /role fable is admitted" 1 "$admitted"
 
-# Case 4: an automated RPC client. This is the ingress that broke a
+# Case 4: THE INGRESS THAT DEFEATED THE MODE CHECK. `omp '/role fable'` passes a
+# positional message to AgentSession.prompt, which dispatches extension
+# commands, and interactive startup reports mode "tui" - so an unattended pty
+# invocation satisfied the mode check. Nobody answers the acknowledgement here,
+# and unanswered resolves false.
+echo "case 4: unattended positional CLI message in a pty"
+(
+  sleep 14
+  printf '\x03'
+  sleep 1
+  printf '\x03'
+  sleep 2
+) | timeout 120 script -qec "omp --no-extensions -e $EXT --no-session --cwd $WORK '/role fable'" /dev/null \
+  >"$WORK/tty-cli.log" 2>&1
+cli_admitted=$(tr -d '\000' <"$WORK/tty-cli.log" | grep -ac 'Role router: @fable')
+check "unacknowledged positional /role fable is refused" 0 "$cli_admitted"
+
+# Case 5: an automated RPC client. This is the ingress that broke a
 # UI-flag-only guard: --mode=rpc gets a real (non-no-op) UI context, so hasUI is
 # true, and its prompt frames DO run slash commands. Measured with the gate
 # removed, this exact frame switches the model - so unlike case 2, this case is
@@ -108,7 +147,7 @@ check "interactive /role fable is admitted" 1 "$admitted"
 # The prompt text goes in `message`; a frame using `prompt` or `text` fails with
 # "undefined is not an object (evaluating 'e.trimStart')" and would make every
 # assertion below vacuously pass, which is why the control matters.
-echo "case 4: automated rpc ingress"
+echo "case 5: automated rpc ingress"
 rpc_fable=$(printf '{"type":"prompt","message":"/role fable"}\n' |
   timeout 90 omp --no-extensions -e "$EXT" --no-session --mode=rpc 2>&1 | grep -c '"type":"model_changed"')
 rpc_incident=$(printf '{"type":"prompt","message":"/role incident"}\n' |

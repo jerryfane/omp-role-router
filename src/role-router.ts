@@ -33,20 +33,39 @@ const INTERACTIVE_ONLY_ROLES: Partial<Record<RoleName, true>> = {
   fable: true,
 };
 
-// The only ingress a person types a command into. Measured on omp 18.1.10:
-//   composer in a terminal  -> hasUI true,  mode "tui"
-//   headless print/json     -> hasUI false, mode "json"/"text"
-//   --mode=rpc / rpc-ui     -> hasUI TRUE,  mode "rpc"
-// The RPC case is why a UI flag alone is not provenance: an automated client
-// gets a non-no-op UI context, so hasUI is true, and its prompt frames run
-// slash commands. `{"type":"prompt","prompt":"/role fable"}` over --mode=rpc
-// switched the model in testing before this check required the mode.
+// Ingress checks for a gated role. Both must hold, and both fail CLOSED.
 //
-// So the mode is an ALLOWLIST of one, and both fields are presence-checked: an
-// unrecognised or unreported mode is refused. A build that renames "tui", adds
-// a new headless transport, or stops reporting either field fails CLOSED.
-function isInteractiveSession(ctx: ExtensionContext): boolean {
+// (1) The session must be a terminal composer session. Measured on omp 18.1.10:
+//   composer in a terminal  -> hasUI true,  mode "tui"
+//   -p text / --mode=json   -> hasUI false, mode "print"/"json"
+//   --mode=rpc / rpc-ui     -> hasUI TRUE,  mode "rpc"
+// The RPC row is why a UI flag alone is not provenance: an automated client
+// gets a non-no-op UI context, so hasUI is true, and its prompt frames run
+// slash commands. `{"type":"prompt","message":"/role fable"}` over --mode=rpc
+// switched the model before this check required the mode. The mode is an
+// allowlist of ONE and both fields are presence-checked, so an unreported or
+// unrecognised mode - a renamed "tui", a new transport - is refused.
+function isComposerSession(ctx: ExtensionContext): boolean {
   return "hasUI" in ctx && ctx.hasUI === true && "mode" in ctx && ctx.mode === "tui";
+}
+
+// (2) The switch must be acknowledged at the moment it happens. The mode check
+// alone is not enough: `omp '/role fable'` passes a POSITIONAL message to
+// AgentSession.prompt, which dispatches extension commands, and interactive
+// startup reports mode "tui" - so an unattended pty invocation cleared check
+// (1) and switched the model. Measured on omp 18.1.10: unanswered, confirm
+// resolves FALSE; a keystroke resolves true.
+//
+// HONEST LIMIT: this proves an ingress that ANSWERS, not a human. Automation
+// that injects a keystroke still passes, and nothing the extension can see
+// distinguishes that. It moves the bar from "any pty invocation" to "an ingress
+// that acknowledges", and unattended automation - the actual leak - fails.
+async function isAcknowledged(ctx: ExtensionContext, role: RoleName, selector: string): Promise<boolean> {
+  const ui = ctx.ui;
+  if (!("confirm" in ui) || typeof ui.confirm !== "function") {
+    return false;
+  }
+  return (await ui.confirm(`Switch this session to @${role} (${selector})?`)) === true;
 }
 
 type ThinkingLevel = "inherit" | "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
@@ -379,12 +398,27 @@ export default function roleRouter(pi: ExtensionAPI) {
         ctx.ui.notify(`Usage: ${ROLE_USAGE}`, "error");
         return;
       }
-      if (INTERACTIVE_ONLY_ROLES[requested] && !isInteractiveSession(ctx)) {
-        ctx.ui.notify(
-          `@${requested} can only be selected from an interactive terminal session; this ingress is not one.`,
-          "error",
-        );
-        return;
+      if (INTERACTIVE_ONLY_ROLES[requested]) {
+        if (!isComposerSession(ctx)) {
+          ctx.ui.notify(
+            `@${requested} can only be selected from an interactive terminal session; this ingress is not one.`,
+            "error",
+          );
+          return;
+        }
+        // Resolve first so the acknowledgement names the model being spent, and
+        // so a misconfigured role fails before a dialog is shown.
+        let selector: string;
+        try {
+          selector = resolveSelector(requested).selector;
+        } catch (error) {
+          ctx.ui.notify(`Role router failed: ${String(error)}`, "error");
+          return;
+        }
+        if (!(await isAcknowledged(ctx, requested, selector))) {
+          ctx.ui.notify(`@${requested} not activated: the switch was not acknowledged.`, "error");
+          return;
+        }
       }
 
       managedRun = false;

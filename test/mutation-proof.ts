@@ -65,6 +65,21 @@ const MUTANTS: Mutant[] = [
     find: 'return "hasUI" in ctx && ctx.hasUI === true && "mode" in ctx && ctx.mode === "tui";',
     replace: 'return "hasUI" in ctx && ctx.hasUI === true;',
   },
+  {
+    name: "M10 accept a switch that was never acknowledged",
+    find: "  return (await ui.confirm(`Switch this session to @${role} (${selector})?`)) === true;",
+    replace: "  await ui.confirm(`Switch this session to @${role} (${selector})?`);\n  return true;",
+  },
+  {
+    name: "M11 fail OPEN when the ui offers no way to acknowledge",
+    find: '  if (!("confirm" in ui) || typeof ui.confirm !== "function") {\n    return false;\n  }',
+    replace: '  if (!("confirm" in ui) || typeof ui.confirm !== "function") {\n    return true;\n  }',
+  },
+  {
+    name: "M12 stop validating the requested role name",
+    find: "  return ROLE_NAMES.some((role) => role === value);",
+    replace: "  return value.length > 0;",
+  },
 ];
 
 type Outcome = { failed: boolean; summary: string };

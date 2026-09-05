@@ -1,6 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import roleRouter from "../src/role-router.ts";
-import { type AgentStartResult, type Harness, makeHarness, type Provenance, writeAgentConfig } from "./harness.ts";
+import {
+  type Acknowledgement,
+  type AgentStartResult,
+  type Harness,
+  makeHarness,
+  type Provenance,
+  writeAgentConfig,
+} from "./harness.ts";
 
 const FABLE_SELECTOR = "anthropic/claude-fable-5-1:high";
 const INCIDENT_SELECTOR = "openai-codex/gpt-5.6-sol:high";
@@ -23,9 +30,14 @@ const LIVE_MODELS = [
   "openai-codex/gpt-5.6-terra",
 ];
 
-function boot(modelRoles: Record<string, string>, models: string[], provenance: Provenance = "interactive"): Harness {
+function boot(
+  modelRoles: Record<string, string>,
+  models: string[],
+  provenance: Provenance = "interactive",
+  acknowledgement: Acknowledgement = "yes",
+): Harness {
   writeAgentConfig(modelRoles);
-  const h = makeHarness(provenance);
+  const h = makeHarness(provenance, acknowledgement);
   for (const model of models) {
     h.knownModels.add(model);
   }
@@ -175,6 +187,48 @@ describe("fable is gated on an interactive ingress", () => {
 
     expect(h.setModelCalls).toEqual([]);
     expect(h.notifications.map((entry) => entry.level)).toEqual(["error"]);
+  });
+
+  // The mode check alone was not enough: `omp '/role fable'` passes a
+  // positional message through the same command dispatch, and interactive
+  // startup reports mode "tui", so an unattended pty invocation cleared it.
+  test("refuses a composer session that does not acknowledge the switch", async () => {
+    const h = boot(LIVE_LIKE_ROLES, LIVE_MODELS, "interactive", "no");
+
+    await runRoleCommand(h, "fable");
+
+    expect(h.confirmPrompts.length).toBe(1);
+    expect(h.setModelCalls).toEqual([]);
+    expect(h.notifications).toEqual([
+      { message: "@fable not activated: the switch was not acknowledged.", level: "error" },
+    ]);
+  });
+
+  test("fails closed when the ui offers no way to acknowledge", async () => {
+    const h = boot(LIVE_LIKE_ROLES, LIVE_MODELS, "interactive", "absent");
+
+    await runRoleCommand(h, "fable");
+
+    expect(h.setModelCalls).toEqual([]);
+    expect(h.notifications.map((entry) => entry.level)).toEqual(["error"]);
+  });
+
+  test("names the model being spent in the acknowledgement, not just the role", async () => {
+    const h = boot(LIVE_LIKE_ROLES, LIVE_MODELS);
+
+    await runRoleCommand(h, "fable");
+
+    expect(h.confirmPrompts).toEqual([`Switch this session to @fable (${FABLE_SELECTOR})?`]);
+    expect(h.setModelCalls).toEqual([{ provider: "anthropic", modelId: "claude-fable-5-1" }]);
+  });
+
+  test("does not ask for an acknowledgement for an ungated role", async () => {
+    const h = boot(LIVE_LIKE_ROLES, LIVE_MODELS);
+
+    await runRoleCommand(h, "incident");
+
+    expect(h.confirmPrompts).toEqual([]);
+    expect(h.setModelCalls).toEqual([{ provider: "openai-codex", modelId: "gpt-5.6-sol" }]);
   });
 
   test("does not gate the roles whose quota is not scarce", async () => {

@@ -68,10 +68,15 @@ const PROVENANCE_FIELDS: Record<Provenance, { hasUI?: boolean; mode?: string }> 
 
 export type FakeCtx = {
   modelRegistry: { find: (provider: string, modelId: string) => ModelKey | undefined };
-  ui: { notify: (message: string, level?: string) => void };
+  ui: { notify: (message: string, level?: string) => void; confirm?: (message: string) => Promise<boolean> };
   hasUI?: boolean;
   mode?: string;
 };
+
+// What the fake ui.confirm does. Measured on omp 18.1.10: unanswered it
+// resolves FALSE, a keystroke resolves true. "absent" models a build with no
+// confirm at all, which must refuse rather than proceed unacknowledged.
+export type Acknowledgement = "yes" | "no" | "absent";
 
 export type Harness = {
   handlers: Map<string, HookHandler>;
@@ -81,6 +86,7 @@ export type Harness = {
   setModelCalls: ModelKey[];
   thinkingCalls: string[];
   notifications: NotifyCall[];
+  confirmPrompts: string[];
   // Models the fake registry resolves; anything else resolves to undefined,
   // which is how an unavailable model behaves in production.
   knownModels: Set<string>;
@@ -89,7 +95,7 @@ export type Harness = {
   ctx: FakeCtx;
 };
 
-export function makeHarness(provenance: Provenance = "interactive"): Harness {
+export function makeHarness(provenance: Provenance = "interactive", acknowledgement: Acknowledgement = "yes"): Harness {
   const handlers = new Map<string, HookHandler>();
   const tools = new Map<string, ToolSpec>();
   const commands = new Map<string, RoleCommandSpec>();
@@ -97,7 +103,7 @@ export function makeHarness(provenance: Provenance = "interactive"): Harness {
   const setModelCalls: ModelKey[] = [];
   const thinkingCalls: string[] = [];
   const notifications: NotifyCall[] = [];
-
+  const confirmPrompts: string[] = [];
   const h: Harness = {
     handlers,
     tools,
@@ -106,6 +112,7 @@ export function makeHarness(provenance: Provenance = "interactive"): Harness {
     setModelCalls,
     thinkingCalls,
     notifications,
+    confirmPrompts,
     knownModels,
     setModelResult: true,
     pi: {
@@ -161,6 +168,14 @@ export function makeHarness(provenance: Provenance = "interactive"): Harness {
         notify(message, level) {
           notifications.push({ message, level });
         },
+        ...(acknowledgement === "absent"
+          ? {}
+          : {
+              async confirm(message: string) {
+                confirmPrompts.push(message);
+                return acknowledgement === "yes";
+              },
+            }),
       },
       ...PROVENANCE_FIELDS[provenance],
     },
