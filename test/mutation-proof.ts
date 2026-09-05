@@ -116,6 +116,11 @@ const MUTANTS: Mutant[] = [
     replace: "  const usable = Number.isFinite(override) && override > 0;",
   },
   {
+    name: "M22 leave the window timer running after the dialog is over",
+    find: "    clearTimeout(abort);",
+    replace: "    void abort;",
+  },
+  {
     name: "M11 fail OPEN when the ui offers no way to acknowledge",
     find: '  if (!("confirm" in ui) || typeof ui.confirm !== "function") {\n    return false;\n  }',
     replace: '  if (!("confirm" in ui) || typeof ui.confirm !== "function") {\n    return true;\n  }',

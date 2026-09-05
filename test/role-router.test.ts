@@ -295,6 +295,40 @@ describe("fable is gated on an interactive ingress", () => {
     }
   });
 
+  // Deterministic, no sleeping: spy on the timer functions and assert the
+  // window timer created for the dialog is the one cleared afterwards. Without
+  // the clearTimeout, every switch leaves a live timer and AbortController for
+  // the length of the window.
+  test("clears the acknowledgement window timer once the dialog is answered", async () => {
+    const realSetTimeout = globalThis.setTimeout;
+    const realClearTimeout = globalThis.clearTimeout;
+    const created: unknown[] = [];
+    const cleared: unknown[] = [];
+    globalThis.setTimeout = ((handler: TimerHandler, ms?: number) => {
+      const id = realSetTimeout(handler, ms);
+      created.push(id);
+      return id;
+    }) as typeof globalThis.setTimeout;
+    globalThis.clearTimeout = ((id?: number | Timer) => {
+      cleared.push(id);
+      realClearTimeout(id as Parameters<typeof realClearTimeout>[0]);
+    }) as typeof globalThis.clearTimeout;
+
+    try {
+      // "yes" answers on the spot, so the only timer created is the window one.
+      const h = boot(LIVE_LIKE_ROLES, LIVE_MODELS, "interactive", "yes");
+
+      await runRoleCommand(h, "fable");
+
+      expect(h.setModelCalls.length).toBe(1);
+      expect(created.length).toBe(1);
+      expect(cleared).toContain(created[0]);
+    } finally {
+      globalThis.setTimeout = realSetTimeout;
+      globalThis.clearTimeout = realClearTimeout;
+    }
+  });
+
   // A window past the platform timer limit fires immediately, which would
   // collapse both the window and the ordering between the two deadlines. An
   // out-of-range override is ignored rather than honoured.
