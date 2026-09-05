@@ -52,32 +52,51 @@ const MUTANTS: Mutant[] = [
   },
   {
     name: "M7 fail OPEN when the runtime reports no provenance",
-    find: 'return "hasUI" in ctx && ctx.hasUI === true;',
-    replace: 'return "hasUI" in ctx ? ctx.hasUI === true : true;',
+    find: 'return "hasUI" in ctx && ctx.hasUI === true && "mode" in ctx && ctx.mode === "tui";',
+    replace: 'return "hasUI" in ctx ? ctx.hasUI === true && ctx.mode === "tui" : true;',
   },
   {
     name: "M8 accept a reported-but-false UI flag as interactive",
-    find: 'return "hasUI" in ctx && ctx.hasUI === true;',
-    replace: 'return "hasUI" in ctx && ctx.hasUI !== undefined;',
+    find: 'ctx.hasUI === true && "mode" in ctx',
+    replace: 'ctx.hasUI !== undefined && "mode" in ctx',
+  },
+  {
+    name: "M9 trust the UI flag alone and ignore the mode (admits an rpc client)",
+    find: 'return "hasUI" in ctx && ctx.hasUI === true && "mode" in ctx && ctx.mode === "tui";',
+    replace: 'return "hasUI" in ctx && ctx.hasUI === true;',
   },
 ];
 
-async function suiteFails(): Promise<{ failed: boolean; summary: string }> {
+type Outcome = { failed: boolean; summary: string };
+
+// A nonzero exit is not by itself a kill: a mutant that fails to parse, or a
+// loader error, also exits nonzero while testing nothing about the guard. Only
+// a run that actually executed tests AND reported a failing one counts, so a
+// mutant that breaks the build is rejected loudly instead of being scored.
+async function runSuite(): Promise<Outcome & { executedTests: boolean }> {
   const result = await $`bun test`.cwd(join(import.meta.dir, "..")).quiet().nothrow();
   const text = new TextDecoder().decode(result.stderr) + new TextDecoder().decode(result.stdout);
-  const summary = text
-    .split("\n")
-    .map((line) => line.trim())
-    .find((line) => line.endsWith("fail") || line.includes(" fail")) ?? "no summary line";
-  return { failed: result.exitCode !== 0, summary };
+  const lines = text.split("\n").map((line) => line.trim());
+  const summary = lines.find((line) => /^Ran \d+ tests?/.test(line)) ?? "no summary line";
+  const firstFailure = lines.find((line) => line.startsWith("(fail)"));
+  const ran = /^Ran (\d+) tests?/.exec(summary);
+  const executedTests = ran !== null && Number(ran[1]) > 0;
+  return {
+    failed: result.exitCode !== 0,
+    summary: firstFailure ? `${firstFailure} | ${summary}` : summary,
+    executedTests,
+  };
 }
 
 const original = readFileSync(SRC, "utf8");
 const baselineSha = Bun.SHA256.hash(original, "hex");
 
-const baseline = await suiteFails();
+const baseline = await runSuite();
 if (baseline.failed) {
   throw new Error(`baseline suite is RED (${baseline.summary}); a mutation proof against a red baseline proves nothing`);
+}
+if (!baseline.executedTests) {
+  throw new Error(`baseline ran no tests (${baseline.summary}); there is nothing for a mutant to break`);
 }
 console.log(`baseline: green (${baseline.summary}), sha ${baselineSha.slice(0, 12)}`);
 
@@ -93,11 +112,16 @@ for (const mutant of MUTANTS) {
     throw new Error(`${mutant.name}: file on disk unchanged, so the mutant never ran`);
   }
 
-  const outcome = await suiteFails();
+  const outcome = await runSuite();
   writeFileSync(SRC, original, "utf8");
   const restoredSha = Bun.SHA256.hash(readFileSync(SRC), "hex");
   if (restoredSha !== baselineSha) {
     throw new Error(`${mutant.name}: restore failed, ${SRC} is left mutated`);
+  }
+  if (!outcome.executedTests) {
+    throw new Error(
+      `${mutant.name}: the suite ran no tests (${outcome.summary}); the mutant broke the build instead of the behaviour, so it scores nothing`,
+    );
   }
 
   console.log(`${outcome.failed ? "KILLED  " : "SURVIVED"} ${mutant.name} | applied ${appliedSha.slice(0, 12)} | ${outcome.summary}`);

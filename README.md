@@ -34,22 +34,33 @@ model. Widening that set is a separate decision from adding a role.
 ### Roles whose quota is scarce are gated on an interactive ingress
 
 `fable` is listed in `INTERACTIVE_ONLY_ROLES` and is refused unless the command context
-reports an interactive session. Measured on omp 18.1.10: a person typing in the composer
-gets `hasUI: true` and `mode: "tui"`; headless runs (`-p`, `--mode=json`) get `hasUI: false`.
-The check is written as a presence test, so a build that stops reporting the field refuses
-rather than treating an unknown ingress as human — it fails **closed**.
+reports a terminal composer session. Measured on omp 18.1.10:
 
-This gate is deliberately not load-bearing on the harness staying as it is. On omp 18.1.10
-an agent-attributed task prompt is delivered to the model as text and is never
-slash-command-dispatched, so agent-authored `/role fable` does not switch anything today.
-That is a property of the harness, not of this repository, and an upgrade could change it
-without any test here failing. The gate is what pins the invariant locally;
-`test/provenance-regression.sh` is what proves it against the real binary.
+| ingress | `hasUI` | `mode` | gated role |
+| --- | --- | --- | --- |
+| composer in a terminal | `true` | `"tui"` | allowed |
+| `-p` / `--mode=json` | `false` | `"json"` | refused |
+| `--mode=rpc`, `--mode=rpc-ui` | **`true`** | `"rpc"` | refused |
 
-A `/role` switch persists for the rest of the session: the restore to `default` runs at the
-end of a *routed* run only, so a manual switch is not undone for you. That is the intended
-behaviour for a choice a person made, and it is the reason an agent-facing switch would need
-a restore path before it could be allowed.
+The RPC row is why a UI flag alone is not provenance: an automated client gets a real
+(non-no-op) UI context, so `hasUI` is `true`, and its prompt frames **do** execute slash
+commands. With the gate checking only `hasUI`, `{"type":"prompt","message":"/role fable"}`
+over `--mode=rpc` switched the model. So the mode is an allowlist of exactly one value, and
+both fields are presence-checked: an unreported or unrecognised mode is refused. A build
+that renames `"tui"`, adds a transport, or stops reporting either field fails **closed**.
+
+The gate is deliberately not load-bearing on the harness staying as it is. On omp 18.1.10 an
+agent-attributed *task* prompt is delivered to the model as text and is never
+slash-command-dispatched, so agent-authored `/role fable` switches nothing today. That is a
+property of the harness, not of this repository, and an upgrade could change it with no test
+here failing. The gate pins the invariant locally; `test/provenance-regression.sh` proves it
+against the real binary.
+
+A `/role` switch is not undone for you at the end of the turn: the restore to `default` runs
+at the end of a *routed* run only. It does not survive unconditionally either — a later
+prompt that matches the routing trigger activates `checkin` regardless of the manual choice.
+That is the intended behaviour for a choice a person made, and it is the reason an
+agent-facing switch would need a restore path before it could be allowed.
 
 The direction matters: escalation is one-way for the duration of a run. A turn that has
 already seen something serious does not drift back down to the cheap model.
@@ -212,11 +223,21 @@ test/provenance-regression.sh [path-to-extension]
 ```
 
 Runs the real `omp` binary, because the fake context in `bun test` cannot prove what the
-runtime reports as provenance. Three cases: a headless run must be refused the gated role
-while an ungated role still switches; an agent-attributed task prompt carrying the command
-text must leave every session off the gated model; and a real pty ingress must be admitted,
-or the gate has simply deleted the feature. It takes the extension path as an argument, so
-running it against a mutated copy is how you check the script itself still fails.
+runtime reports as provenance. Four cases:
+
+1. **headless** — the gated role is refused while an ungated role still switches (the
+   control: without it, "no switch" and "the extension never loaded" look identical).
+2. **agent-attributed task prompt** — characterises the harness rather than testing the
+   guard. It asserts a child really received the literal command text, agent-attributed,
+   and that no session switched. It passes with the gate removed, and exists to fail loudly
+   if an omp upgrade ever starts dispatching that text.
+3. **interactive pty** — a real terminal must be admitted, or the gate has deleted the
+   feature rather than secured it.
+4. **automated rpc** — the ingress that broke a UI-flag-only gate; refused now, with an
+   ungated-role control proving the frame reaches the handler at all.
+
+It takes the extension path as an argument, so running it against a mutated copy is how you
+check the script itself still fails. With the gate removed, cases 1 and 4 both fail.
 
 ## Requirements
 

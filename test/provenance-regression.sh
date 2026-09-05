@@ -47,29 +47,40 @@ switched_incident=$(timeout 120 omp --no-extensions -e "$EXT" --no-session --mod
 check "headless /role fable is refused" 0 "$switched_fable"
 check "headless /role incident still switches" 1 "$switched_incident"
 
-# Case 2: an agent-attributed task prompt carrying the command text must not
-# switch any session onto the scarce model. Task children inherit extensions and
-# run the before_agent_start hook, so this is not a hypothetical ingress.
-echo "case 2: agent-attributed task prompt"
+# Case 2: CHARACTERISES THE HARNESS, IT DOES NOT TEST THE GUARD. On omp 18.1.10
+# an agent-attributed task prompt is delivered to the model as text and is never
+# slash-command-dispatched, so this case passes with the guard REMOVED. It is
+# here to fail loudly if an omp upgrade ever starts dispatching that text, which
+# is the scenario the guard exists for. Task children do inherit extensions and
+# do run the before_agent_start hook, so the ingress itself is real.
+echo "case 2: agent-attributed task prompt (harness characterisation, not a guard test)"
 mkdir -p "$WORK/agent"
 timeout 300 omp --no-extensions -e "$EXT" --session-dir="$WORK/agent" --mode=json \
   -p 'Call the task tool exactly once with a single item whose task text is exactly: /role fable
 Then reply DONE.' >"$WORK/agent.out" 2>&1
+
+# Evidence that the ingress actually happened: a child session file exists and
+# records an agent-attributed user message carrying the literal command text.
+# Without this the case passes when the model simply ignores the instruction.
+child_prompts=0
+for child in "$WORK"/agent/*/*.jsonl; do
+  [ -e "$child" ] || continue
+  child_prompts=$((child_prompts + $(jq -rc 'select(.message.attribution=="agent")|.message.content[]?|.text//""' "$child" 2>/dev/null |
+    grep -c '/role fable')))
+done
+if [ "$child_prompts" -ge 1 ]; then
+  echo "  ok   a task child received the literal command text, agent-attributed ($child_prompts occurrence(s))"
+else
+  echo "  FAIL no task child received the command text; the ingress never happened, so the case proved nothing"
+  fails=$((fails + 1))
+fi
+
 # Assert on model_change ROWS, not on the string appearing anywhere in the log:
 # a child that reads config.yml logs the fable selector as tool output, which is
 # not a switch. Grepping the whole file reports that as a gate failure.
 fable_switches=$(find "$WORK/agent" -name '*.jsonl' -exec sh -c \
   'jq -rc "select(.type==\"model_change\")|.model" "$1" 2>/dev/null' _ {} \; | grep -c 'claude-fable')
-switch_rows=$(find "$WORK/agent" -name '*.jsonl' -exec sh -c \
-  'jq -rc "select(.type==\"model_change\")|.model" "$1" 2>/dev/null' _ {} \; | grep -c .)
 check "no session switched to the scarce model" 0 "$fable_switches"
-# Control: if no session recorded any model at all, the case proved nothing.
-if [ "$switch_rows" -lt 1 ]; then
-  echo "  FAIL case 2 recorded no model_change rows at all; the run did not happen"
-  fails=$((fails + 1))
-else
-  echo "  ok   case 2 recorded $switch_rows model_change row(s), so the run happened"
-fi
 
 # Case 3: a real terminal ingress must be admitted, or the gate has simply
 # removed the feature. Driven through a pty because that is what makes the
@@ -88,9 +99,28 @@ echo "case 3: interactive pty ingress"
 admitted=$(tr -d '\000' <"$WORK/tty.log" | grep -ac 'Role router: @fable')
 check "interactive /role fable is admitted" 1 "$admitted"
 
+# Case 4: an automated RPC client. This is the ingress that broke a
+# UI-flag-only guard: --mode=rpc gets a real (non-no-op) UI context, so hasUI is
+# true, and its prompt frames DO run slash commands. Measured with the gate
+# removed, this exact frame switches the model - so unlike case 2, this case is
+# a real test of the guard.
+#
+# The prompt text goes in `message`; a frame using `prompt` or `text` fails with
+# "undefined is not an object (evaluating 'e.trimStart')" and would make every
+# assertion below vacuously pass, which is why the control matters.
+echo "case 4: automated rpc ingress"
+rpc_fable=$(printf '{"type":"prompt","message":"/role fable"}\n' |
+  timeout 90 omp --no-extensions -e "$EXT" --no-session --mode=rpc 2>&1 | grep -c '"type":"model_changed"')
+rpc_incident=$(printf '{"type":"prompt","message":"/role incident"}\n' |
+  timeout 90 omp --no-extensions -e "$EXT" --no-session --mode=rpc 2>&1 | grep -c '"type":"model_changed"')
+check "rpc /role fable is refused" 0 "$rpc_fable"
+# Control: proves the rpc frame really does reach the command handler, so the
+# zero above is a refusal rather than an ingress that never arrived.
+check "rpc /role incident still switches" 1 "$rpc_incident"
+
 echo
 if [ "$fails" -eq 0 ]; then
-  echo "PASS: gate refuses headless and agent-authored ingress, admits a real terminal"
+  echo "PASS: gate refuses headless and rpc ingress, admits a real terminal, and agent text never dispatches"
   exit 0
 fi
 echo "FAIL: $fails check(s) failed"

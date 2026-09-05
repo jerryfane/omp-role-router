@@ -128,10 +128,44 @@ describe("fable is gated on an interactive ingress", () => {
     expect(h.setModelCalls).toEqual([]);
     expect(h.notifications).toEqual([
       {
-        message: "@fable can only be selected from an interactive session; this one reports no UI.",
+        message: "@fable can only be selected from an interactive terminal session; this ingress is not one.",
         level: "error",
       },
     ]);
+  });
+
+  // The case that made a UI flag alone insufficient: --mode=rpc gets a real
+  // (non-no-op) UI context, so hasUI is true, and its prompt frames execute
+  // slash commands. Measured: `{"type":"prompt","prompt":"/role fable"}` over
+  // --mode=rpc switched the model while the guard checked only hasUI.
+  test("refuses an automated rpc client even though it reports a UI", async () => {
+    const h = boot(LIVE_LIKE_ROLES, LIVE_MODELS, "rpc");
+
+    await runRoleCommand(h, "fable");
+
+    expect(h.setModelCalls).toEqual([]);
+    expect(h.notifications.map((entry) => entry.level)).toEqual(["error"]);
+  });
+
+  test("fails closed when a UI is reported but the mode is not", async () => {
+    const h = boot(LIVE_LIKE_ROLES, LIVE_MODELS, "uiOnly");
+
+    await runRoleCommand(h, "fable");
+
+    expect(h.setModelCalls).toEqual([]);
+    expect(h.notifications.map((entry) => entry.level)).toEqual(["error"]);
+  });
+
+  // Both fields must affirm. Without this case the hasUI check is not
+  // load-bearing: a mutant that only tests for the field's PRESENCE keeps every
+  // other test green, because the mode check catches the headless fixtures.
+  test("fails closed when the mode says composer but no UI is reported", async () => {
+    const h = boot(LIVE_LIKE_ROLES, LIVE_MODELS, "modeOnly");
+
+    await runRoleCommand(h, "fable");
+
+    expect(h.setModelCalls).toEqual([]);
+    expect(h.notifications.map((entry) => entry.level)).toEqual(["error"]);
   });
 
   test("fails closed when the context reports no provenance at all", async () => {

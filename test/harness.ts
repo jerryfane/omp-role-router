@@ -44,11 +44,27 @@ export type FakePi = {
   };
 };
 
-// How the fake reports the ingress that a /role command arrived on. Measured on
-// omp 18.1.10: a person typing in the composer gets hasUI true and mode "tui";
-// headless runs get hasUI false and mode "json"/"text". "absent" models a build
-// that stops reporting the field at all, which must fail closed.
-export type Provenance = "interactive" | "headless" | "absent";
+// How the fake reports the ingress a /role command arrived on. Measured on omp
+// 18.1.10:
+//   "interactive" -> hasUI true,  mode "tui"   (a person in the composer)
+//   "headless"    -> hasUI false, mode "json"  (-p / --mode=json)
+//   "rpc"         -> hasUI TRUE,  mode "rpc"   (--mode=rpc, an automated client
+//                    with a real UI context whose prompt frames run commands)
+//   "uiOnly"      -> hasUI true,  mode absent  (a build that stops reporting it)
+//   "modeOnly"    -> hasUI false, mode "tui"   (a headless harness claiming the
+//                    composer mode; both fields must affirm, so this is refused)
+//   "absent"      -> neither field reported
+// Anything other than "interactive" must be refused a gated role.
+export type Provenance = "interactive" | "headless" | "rpc" | "uiOnly" | "modeOnly" | "absent";
+
+const PROVENANCE_FIELDS: Record<Provenance, { hasUI?: boolean; mode?: string }> = {
+  interactive: { hasUI: true, mode: "tui" },
+  headless: { hasUI: false, mode: "json" },
+  rpc: { hasUI: true, mode: "rpc" },
+  uiOnly: { hasUI: true },
+  modeOnly: { hasUI: false, mode: "tui" },
+  absent: {},
+};
 
 export type FakeCtx = {
   modelRegistry: { find: (provider: string, modelId: string) => ModelKey | undefined };
@@ -146,9 +162,7 @@ export function makeHarness(provenance: Provenance = "interactive"): Harness {
           notifications.push({ message, level });
         },
       },
-      ...(provenance === "absent"
-        ? {}
-        : { hasUI: provenance === "interactive", mode: provenance === "interactive" ? "tui" : "json" }),
+      ...PROVENANCE_FIELDS[provenance],
     },
   };
 

@@ -33,14 +33,20 @@ const INTERACTIVE_ONLY_ROLES: Partial<Record<RoleName, true>> = {
   fable: true,
 };
 
-// Provenance for a /role invocation. Measured on omp 18.1.10: the command
-// context reports hasUI true and mode "tui" for a person typing in the
-// composer, and hasUI false with mode "json"/"text" for headless runs, which is
-// where an unattended or agent-driven ingress lands. Written as a presence
-// check so a build that stops reporting the field fails CLOSED rather than
-// treating an unknown ingress as human.
+// The only ingress a person types a command into. Measured on omp 18.1.10:
+//   composer in a terminal  -> hasUI true,  mode "tui"
+//   headless print/json     -> hasUI false, mode "json"/"text"
+//   --mode=rpc / rpc-ui     -> hasUI TRUE,  mode "rpc"
+// The RPC case is why a UI flag alone is not provenance: an automated client
+// gets a non-no-op UI context, so hasUI is true, and its prompt frames run
+// slash commands. `{"type":"prompt","prompt":"/role fable"}` over --mode=rpc
+// switched the model in testing before this check required the mode.
+//
+// So the mode is an ALLOWLIST of one, and both fields are presence-checked: an
+// unrecognised or unreported mode is refused. A build that renames "tui", adds
+// a new headless transport, or stops reporting either field fails CLOSED.
 function isInteractiveSession(ctx: ExtensionContext): boolean {
-  return "hasUI" in ctx && ctx.hasUI === true;
+  return "hasUI" in ctx && ctx.hasUI === true && "mode" in ctx && ctx.mode === "tui";
 }
 
 type ThinkingLevel = "inherit" | "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
@@ -375,7 +381,7 @@ export default function roleRouter(pi: ExtensionAPI) {
       }
       if (INTERACTIVE_ONLY_ROLES[requested] && !isInteractiveSession(ctx)) {
         ctx.ui.notify(
-          `@${requested} can only be selected from an interactive session; this one reports no UI.`,
+          `@${requested} can only be selected from an interactive terminal session; this ingress is not one.`,
           "error",
         );
         return;
