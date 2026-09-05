@@ -53,19 +53,46 @@ function isComposerSession(ctx: ExtensionContext): boolean {
 // alone is not enough: `omp '/role fable'` passes a POSITIONAL message to
 // AgentSession.prompt, which dispatches extension commands, and interactive
 // startup reports mode "tui" - so an unattended pty invocation cleared check
-// (1) and switched the model. Measured on omp 18.1.10: unanswered, confirm
-// resolves FALSE; a keystroke resolves true.
+// (1) and switched the model.
+//
+// The wait is bounded HERE rather than by confirm's own timeout option, because
+// on omp 18.1.10 the selector's timeout picks its DEFAULT first option, which
+// is Yes - a timeout that fails OPEN. This races the dialog against a timer
+// that resolves false, so silence denies and nothing hangs. A throw denies too.
 //
 // HONEST LIMIT: this proves an ingress that ANSWERS, not a human. Automation
 // that injects a keystroke still passes, and nothing the extension can see
 // distinguishes that. It moves the bar from "any pty invocation" to "an ingress
-// that acknowledges", and unattended automation - the actual leak - fails.
+// that acknowledges within the window", and unattended automation - the actual
+// leak - fails.
+// How long silence is allowed to stand before it counts as a refusal. Read per
+// invocation rather than at load so a test can exercise the silence path
+// without waiting a minute; anything unparseable or non-positive keeps 60s.
+function acknowledgementTimeoutMs(): number {
+  const override = Number(process.env.PI_ROLE_ROUTER_ACK_TIMEOUT_MS);
+  return Number.isFinite(override) && override > 0 ? override : 60_000;
+}
+
 async function isAcknowledged(ctx: ExtensionContext, role: RoleName, selector: string): Promise<boolean> {
   const ui = ctx.ui;
   if (!("confirm" in ui) || typeof ui.confirm !== "function") {
     return false;
   }
-  return (await ui.confirm(`Switch this session to @${role} (${selector})?`)) === true;
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const answered = Promise.resolve(ui.confirm(`Switch this session to @${role} (${selector})?`)).then(
+    (answer) => answer === true,
+    () => false,
+  );
+  const denied = new Promise<false>((resolve) => {
+    timer = setTimeout(() => resolve(false), acknowledgementTimeoutMs());
+  });
+
+  try {
+    return await Promise.race([answered, denied]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 type ThinkingLevel = "inherit" | "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";

@@ -213,6 +213,37 @@ describe("fable is gated on an interactive ingress", () => {
     expect(h.notifications.map((entry) => entry.level)).toEqual(["error"]);
   });
 
+  // Silence is the case that matters: on omp 18.1.10 an unanswered dialog does
+  // not resolve at all, so an unbounded await would hang the session rather
+  // than refuse. The extension bounds the wait itself and denies on expiry -
+  // confirm's own timeout option is unusable because it selects the DEFAULT
+  // first option, which is Yes.
+  test("denies, rather than hanging, when nobody ever answers", async () => {
+    process.env.PI_ROLE_ROUTER_ACK_TIMEOUT_MS = "50";
+    try {
+      const h = boot(LIVE_LIKE_ROLES, LIVE_MODELS, "interactive", "silent");
+
+      await runRoleCommand(h, "fable");
+
+      expect(h.confirmPrompts.length).toBe(1);
+      expect(h.setModelCalls).toEqual([]);
+      expect(h.notifications).toEqual([
+        { message: "@fable not activated: the switch was not acknowledged.", level: "error" },
+      ]);
+    } finally {
+      delete process.env.PI_ROLE_ROUTER_ACK_TIMEOUT_MS;
+    }
+  });
+
+  test("denies when the dialog cannot be presented at all", async () => {
+    const h = boot(LIVE_LIKE_ROLES, LIVE_MODELS, "interactive", "throws");
+
+    await runRoleCommand(h, "fable");
+
+    expect(h.setModelCalls).toEqual([]);
+    expect(h.notifications.map((entry) => entry.level)).toEqual(["error"]);
+  });
+
   test("names the model being spent in the acknowledgement, not just the role", async () => {
     const h = boot(LIVE_LIKE_ROLES, LIVE_MODELS);
 

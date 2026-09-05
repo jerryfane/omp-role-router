@@ -36,6 +36,17 @@ check() { # check <label> <expected> <actual>
   fi
 }
 
+# The TUI redraws, so a notification can appear several times in a captured pty
+# stream. Presence is the assertion there; exact counts belong to event streams.
+check_seen() { # check_seen <label> <actual-count>
+  if [ "$2" -ge 1 ]; then
+    echo "  ok   $1 (seen $2x)"
+  else
+    echo "  FAIL $1: not seen"
+    fails=$((fails + 1))
+  fi
+}
+
 # Case 1: a headless run reports no UI, so the scarce role must be refused
 # while an ungated role still switches. Without the control, "no switch" could
 # equally mean the extension never loaded.
@@ -119,24 +130,46 @@ echo "case 3: interactive pty ingress, acknowledged"
 ) | timeout 120 script -qec "omp --no-extensions -e $EXT --no-session --cwd $WORK" /dev/null \
   >"$WORK/tty.log" 2>&1
 admitted=$(tr -d '\000' <"$WORK/tty.log" | grep -ac 'Role router: @fable')
-check "interactive acknowledged /role fable is admitted" 1 "$admitted"
+check_seen "interactive acknowledged /role fable is admitted" "$admitted"
 
 # Case 4: THE INGRESS THAT DEFEATED THE MODE CHECK. `omp '/role fable'` passes a
 # positional message to AgentSession.prompt, which dispatches extension
 # commands, and interactive startup reports mode "tui" - so an unattended pty
-# invocation satisfied the mode check. Nobody answers the acknowledgement here,
-# and unanswered resolves false.
+# invocation satisfied the mode check on its own.
+#
+# Nobody answers here. An unanswered dialog does NOT resolve on 18.1.10, so the
+# extension bounds the wait itself; the window is shortened via the documented
+# override so the case does not idle for a minute. The refusal MESSAGE is
+# asserted, not just the absence of a switch: a session that failed to start, or
+# a command that never dispatched, would also produce zero admissions.
 echo "case 4: unattended positional CLI message in a pty"
+
+# Positive control first: an ungated role through the SAME positional ingress
+# must switch, which proves positional command dispatch works in this harness.
 (
-  sleep 14
+  sleep 10
   printf '\x03'
   sleep 1
   printf '\x03'
   sleep 2
-) | timeout 120 script -qec "omp --no-extensions -e $EXT --no-session --cwd $WORK '/role fable'" /dev/null \
+) | timeout 120 script -qec "omp --no-extensions -e $EXT --no-session --cwd $WORK '/role incident'" /dev/null \
+  >"$WORK/tty-cli-control.log" 2>&1
+cli_control=$(tr -d '\000' <"$WORK/tty-cli-control.log" | grep -ac 'Role router: @incident')
+check_seen "positional ingress does reach the handler (ungated role)" "$cli_control"
+
+(
+  sleep 16
+  printf '\x03'
+  sleep 1
+  printf '\x03'
+  sleep 2
+) | PI_ROLE_ROUTER_ACK_TIMEOUT_MS=4000 timeout 120 script -qec \
+  "omp --no-extensions -e $EXT --no-session --cwd $WORK '/role fable'" /dev/null \
   >"$WORK/tty-cli.log" 2>&1
 cli_admitted=$(tr -d '\000' <"$WORK/tty-cli.log" | grep -ac 'Role router: @fable')
+cli_refused=$(tr -d '\000' <"$WORK/tty-cli.log" | grep -ac 'not activated: the switch was not acknowledged')
 check "unacknowledged positional /role fable is refused" 0 "$cli_admitted"
+check_seen "and refused by the acknowledgement window, not by a dead session" "$cli_refused"
 
 # Case 5: an automated RPC client. This is the ingress that broke a
 # UI-flag-only guard: --mode=rpc gets a real (non-no-op) UI context, so hasUI is

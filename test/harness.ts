@@ -73,10 +73,12 @@ export type FakeCtx = {
   mode?: string;
 };
 
-// What the fake ui.confirm does. Measured on omp 18.1.10: unanswered it
-// resolves FALSE, a keystroke resolves true. "absent" models a build with no
-// confirm at all, which must refuse rather than proceed unacknowledged.
-export type Acknowledgement = "yes" | "no" | "absent";
+// What the fake ui.confirm does. Measured on omp 18.1.10: a keystroke resolves
+// true, and CANCELLATION resolves false - silence does not resolve at all,
+// which is why the extension bounds the wait itself. "absent" models a build
+// with no confirm; "silent" a dialog nobody ever answers; "throws" a dialog
+// that cannot be presented.
+export type Acknowledgement = "yes" | "no" | "absent" | "silent" | "throws";
 
 export type Harness = {
   handlers: Map<string, HookHandler>;
@@ -173,6 +175,13 @@ export function makeHarness(provenance: Provenance = "interactive", acknowledgem
           : {
               async confirm(message: string) {
                 confirmPrompts.push(message);
+                if (acknowledgement === "throws") {
+                  throw new Error("no terminal to present a dialog on");
+                }
+                if (acknowledgement === "silent") {
+                  // Never settles, exactly like a dialog nobody answers.
+                  return await new Promise<boolean>(() => {});
+                }
                 return acknowledgement === "yes";
               },
             }),

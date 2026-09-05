@@ -67,8 +67,23 @@ const MUTANTS: Mutant[] = [
   },
   {
     name: "M10 accept a switch that was never acknowledged",
-    find: "  return (await ui.confirm(`Switch this session to @${role} (${selector})?`)) === true;",
-    replace: "  await ui.confirm(`Switch this session to @${role} (${selector})?`);\n  return true;",
+    find: "    (answer) => answer === true,",
+    replace: "    () => true,",
+  },
+  {
+    name: "M13 fail OPEN when the acknowledgement window expires",
+    find: "    timer = setTimeout(() => resolve(false), acknowledgementTimeoutMs());",
+    replace: "    timer = setTimeout(() => resolve(true as unknown as false), acknowledgementTimeoutMs());",
+  },
+  {
+    name: "M14 await the dialog unbounded, so silence hangs instead of denying",
+    find: "    return await Promise.race([answered, denied]);",
+    replace: "    return await answered;",
+  },
+  {
+    name: "M15 treat a dialog that cannot be presented as an acknowledgement",
+    find: "    () => false,\n  );",
+    replace: "    () => true,\n  );",
   },
   {
     name: "M11 fail OPEN when the ui offers no way to acknowledge",

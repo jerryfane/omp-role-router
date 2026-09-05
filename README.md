@@ -56,12 +56,21 @@ that stops reporting either field is refused.
 selector being spent. The mode check alone is not enough: `omp '/role fable'` passes a
 **positional** message to `AgentSession.prompt`, which dispatches extension commands, and
 interactive startup reports `mode: "tui"` — so an unattended pty invocation cleared check 1
-and switched the model. Measured: unanswered, `confirm` resolves `false`; a keystroke
-resolves `true`. A build with no `confirm` on `ctx.ui` is refused.
+and switched the model (reproduced on 18.1.10 in a scripted pty with no keystrokes).
 
-**The honest limit.** This proves an ingress that *answers*, not a human. Automation that
-injects a keystroke still passes, and nothing visible to an extension distinguishes it. What
-it removes is the unattended case, which is the actual leak.
+Measured: a keystroke resolves `true`, **cancellation** resolves `false`, and plain silence
+**does not resolve at all**. So the wait is bounded here — the dialog is raced against a
+timer that denies, default 60s, overridable with `PI_ROLE_ROUTER_ACK_TIMEOUT_MS` so tests do
+not idle. `confirm`'s own timeout option is unusable: on 18.1.10 the selector's timeout
+picks its **default first option, which is Yes** — a timeout that fails open. A `confirm`
+that throws denies, and a `ctx.ui` with no `confirm` denies.
+
+**The honest limit, and it is an API limit rather than a design choice.** This proves an
+ingress that *answers*, not a human. The command context exposes `mode` and `hasUI` and
+nothing about the submitter; `ctx.ui` exposes `onTerminalInput`, but a scripted pty produces
+real terminal input too. At this API there is no signal that separates fingers from a
+script, so automation that injects a keystroke still passes. What the gate removes is the
+**unattended** case, which is the actual leak.
 
 Neither check is load-bearing on the harness staying as it is. On omp 18.1.10 an
 agent-attributed *task* prompt is delivered to the model as text and is never
