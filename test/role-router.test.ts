@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import roleRouter from "../src/role-router.ts";
 import {
   type Acknowledgement,
@@ -213,12 +215,14 @@ describe("fable is gated on an interactive ingress", () => {
     expect(h.notifications.map((entry) => entry.level)).toEqual(["error"]);
   });
 
-  // Silence is the case that matters: on omp 18.1.10 an unanswered dialog does
-  // not resolve at all, so an unbounded await would hang the session rather
-  // than refuse. The extension bounds the wait itself and denies on expiry -
-  // confirm's own timeout option is unusable because it selects the DEFAULT
-  // first option, which is Yes.
-  test("denies, rather than hanging, when nobody ever answers", async () => {
+  // THE LIVENESS TEST. A refusal that leaves the dialog presented is not a safe
+  // failure: omp keeps that selector focused and queues later dialogs, so the
+  // session stops accepting commands. Measured in a real pty against the
+  // previous implementation: /role fable unanswered printed the refusal, and a
+  // following /role incident NEVER RAN. Asserting the refusal alone cannot see
+  // that, so this asserts the dialog is CLOSED and that a second command still
+  // works in the same session.
+  test("denies without leaving the session wedged when nobody answers", async () => {
     process.env.PI_ROLE_ROUTER_ACK_TIMEOUT_MS = "50";
     try {
       const h = boot(LIVE_LIKE_ROLES, LIVE_MODELS, "interactive", "silent");
@@ -230,6 +234,62 @@ describe("fable is gated on an interactive ingress", () => {
       expect(h.notifications).toEqual([
         { message: "@fable not activated: the switch was not acknowledged.", level: "error" },
       ]);
+      // No dialog left behind, and the session takes the next command.
+      expect(h.dialogsOpen).toBe(0);
+
+      await runRoleCommand(h, "incident");
+      expect(h.setModelCalls).toEqual([{ provider: "openai-codex", modelId: "gpt-5.6-sol" }]);
+    } finally {
+      delete process.env.PI_ROLE_ROUTER_ACK_TIMEOUT_MS;
+    }
+  });
+
+  // Each half of the redundancy is sufficient alone. A build that ignores the
+  // signal must still be denied by the No-defaulted timeout, and a build that
+  // ignores initialIndex - whose timeout therefore answers YES - must still be
+  // denied by the abort. A test that only fails when both are broken proves
+  // neither.
+  test("denies through the timeout alone when the signal is ignored", async () => {
+    process.env.PI_ROLE_ROUTER_ACK_TIMEOUT_MS = "20";
+    try {
+      const h = boot(LIVE_LIKE_ROLES, LIVE_MODELS, "interactive", "ignoresSignal");
+
+      await runRoleCommand(h, "fable");
+
+      expect(h.confirmOptions[0]?.initialIndex).toBe(1);
+      expect(h.setModelCalls).toEqual([]);
+      expect(h.dialogsOpen).toBe(0);
+    } finally {
+      delete process.env.PI_ROLE_ROUTER_ACK_TIMEOUT_MS;
+    }
+  });
+
+  test("denies through the abort alone when the timeout would answer yes", async () => {
+    process.env.PI_ROLE_ROUTER_ACK_TIMEOUT_MS = "20";
+    try {
+      const h = boot(LIVE_LIKE_ROLES, LIVE_MODELS, "interactive", "ignoresDefault");
+
+      await runRoleCommand(h, "fable");
+
+      expect(h.confirmOptions[0]?.signal).toBeDefined();
+      expect(h.setModelCalls).toEqual([]);
+      expect(h.dialogsOpen).toBe(0);
+    } finally {
+      delete process.env.PI_ROLE_ROUTER_ACK_TIMEOUT_MS;
+    }
+  });
+
+  test("gives the dialog a deadline behind the abort, in milliseconds", async () => {
+    process.env.PI_ROLE_ROUTER_ACK_TIMEOUT_MS = "20";
+    try {
+      const h = boot(LIVE_LIKE_ROLES, LIVE_MODELS, "interactive", "silent");
+
+      await runRoleCommand(h, "fable");
+
+      // Strictly greater than the abort window: if the two deadlines coincided
+      // they would race for the answer, and on a build that ignores
+      // initialIndex the timeout's answer is Yes.
+      expect(h.confirmOptions[0]?.timeout).toBe(520);
     } finally {
       delete process.env.PI_ROLE_ROUTER_ACK_TIMEOUT_MS;
     }
@@ -249,7 +309,8 @@ describe("fable is gated on an interactive ingress", () => {
 
     await runRoleCommand(h, "fable");
 
-    expect(h.confirmPrompts).toEqual([`Switch this session to @fable (${FABLE_SELECTOR})?`]);
+    expect(h.confirmPrompts).toEqual(["Switch this session to @fable?"]);
+    expect(h.confirmDetails).toEqual([`Spends ${FABLE_SELECTOR}. This is the scarce model.`]);
     expect(h.setModelCalls).toEqual([{ provider: "anthropic", modelId: "claude-fable-5-1" }]);
   });
 
@@ -314,5 +375,85 @@ describe("the agent-facing surface is unchanged by this change", () => {
     expect(h.setModelCalls).toEqual([{ provider: "openai-codex", modelId: "gpt-5.6-terra" }]);
     expect(h.activeTools).toContain("session_role");
     expect(result?.systemPrompt.length).toBe(2);
+  });
+});
+
+describe("a gated activation leaves an attributable record", () => {
+  test("records the session, the selector and the gate that admitted it", async () => {
+    const dir = writeAgentConfig(LIVE_LIKE_ROLES);
+    const h = makeHarness();
+    for (const model of LIVE_MODELS) {
+      h.knownModels.add(model);
+    }
+    roleRouter(h.pi as never);
+
+    await runRoleCommand(h, "fable");
+
+    const rows = readFileSync(join(dir, "role-activations.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    expect(rows.length).toBe(1);
+    expect(rows[0]).toMatchObject({
+      event: "gated_role_activated",
+      role: "fable",
+      selector: FABLE_SELECTOR,
+      gate: "composer_session_plus_acknowledgement",
+      session: "01a07000-0000-7000-8000-000000000abc",
+    });
+    expect(typeof rows[0].ts).toBe("string");
+  });
+
+  test("writes nothing for an ungated role", async () => {
+    const dir = writeAgentConfig(LIVE_LIKE_ROLES);
+    const h = makeHarness();
+    for (const model of LIVE_MODELS) {
+      h.knownModels.add(model);
+    }
+    roleRouter(h.pi as never);
+
+    await runRoleCommand(h, "incident");
+
+    expect(existsSync(join(dir, "role-activations.jsonl"))).toBe(false);
+  });
+
+  // An activation nobody can attribute is the thing the record exists to
+  // prevent, so failing to write it refuses the switch rather than proceeding
+  // quietly.
+  test("refuses the switch when the record cannot be written", async () => {
+    const dir = writeAgentConfig(LIVE_LIKE_ROLES);
+    mkdirSync(join(dir, "role-activations.jsonl"));
+    const h = makeHarness();
+    for (const model of LIVE_MODELS) {
+      h.knownModels.add(model);
+    }
+    roleRouter(h.pi as never);
+
+    await runRoleCommand(h, "fable");
+
+    expect(h.setModelCalls).toEqual([]);
+    expect(h.notifications[0]?.message).toContain("could not be recorded");
+  });
+
+  // The dialog names a selector; activating must use THAT one. Re-resolving
+  // after the acknowledgement lets an edit during the window switch to a model
+  // the human never saw.
+  test("activates the acknowledged selector even if the config changes during the dialog", async () => {
+    const dir = writeAgentConfig(LIVE_LIKE_ROLES);
+    const h = makeHarness();
+    for (const model of [...LIVE_MODELS, "anthropic/claude-swapped-1"]) {
+      h.knownModels.add(model);
+    }
+    roleRouter(h.pi as never);
+
+    const command = h.commands.get("role");
+    if (!command) {
+      throw new Error("extension registered no /role command");
+    }
+    // Rewrite FABLE while the dialog is open: the fake answers on the next tick,
+    // so this lands between resolution and activation.
+    const pending = command.handler("fable", h.ctx);
+    writeFileSync(join(dir, "config.yml"), 'setupVersion: 2\nmodelRoles:\n  FABLE: "anthropic/claude-swapped-1:low"\n', "utf8");
+    await pending;
+
+    expect(h.setModelCalls).toEqual([{ provider: "anthropic", modelId: "claude-fable-5-1" }]);
+    expect(h.thinkingCalls).toEqual(["high"]);
   });
 });

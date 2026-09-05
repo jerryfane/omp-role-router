@@ -66,19 +66,40 @@ const PROVENANCE_FIELDS: Record<Provenance, { hasUI?: boolean; mode?: string }> 
   absent: {},
 };
 
+export type DialogOptions = { timeout?: number; initialIndex?: number; signal?: AbortSignal };
+
 export type FakeCtx = {
   modelRegistry: { find: (provider: string, modelId: string) => ModelKey | undefined };
-  ui: { notify: (message: string, level?: string) => void; confirm?: (message: string) => Promise<boolean> };
+  ui: {
+    notify: (message: string, level?: string) => void;
+    confirm?: (title: string, message: string, options?: DialogOptions) => Promise<boolean>;
+  };
+  sessionManager?: { getSessionId: () => string };
   hasUI?: boolean;
   mode?: string;
 };
 
-// What the fake ui.confirm does. Measured on omp 18.1.10: a keystroke resolves
-// true, and CANCELLATION resolves false - silence does not resolve at all,
-// which is why the extension bounds the wait itself. "absent" models a build
-// with no confirm; "silent" a dialog nobody ever answers; "throws" a dialog
-// that cannot be presented.
-export type Acknowledgement = "yes" | "no" | "absent" | "silent" | "throws";
+// What the fake ui.confirm does. Measured on omp 18.1.10, each in its own pty
+// with nobody answering: `{signal}` aborted at 5s resolved FALSE at 5003ms;
+// `{timeout:5000}` resolved TRUE at 5002ms (the built-in timeout answers with
+// the cursor position); `{timeout:5, initialIndex:1}` resolved false at 7ms.
+// Silence with neither option set does not resolve at all.
+//
+//   "yes" / "no"       - answered by a keystroke
+//   "absent"           - a build with no confirm on ctx.ui
+//   "throws"           - a dialog that cannot be presented
+//   "silent"           - nobody answers; honours BOTH deadlines
+//   "ignoresSignal"    - honours only the built-in timeout
+//   "ignoresDefault"   - honours the signal; its timeout answers YES, i.e. a
+//                        build that ignores initialIndex
+export type Acknowledgement =
+  | "yes"
+  | "no"
+  | "absent"
+  | "throws"
+  | "silent"
+  | "ignoresSignal"
+  | "ignoresDefault";
 
 export type Harness = {
   handlers: Map<string, HookHandler>;
@@ -89,6 +110,12 @@ export type Harness = {
   thinkingCalls: string[];
   notifications: NotifyCall[];
   confirmPrompts: string[];
+  confirmDetails: string[];
+  confirmOptions: DialogOptions[];
+  // Dialogs presented but never settled. A refusal that leaves one of these
+  // behind is the wedge: omp keeps that selector focused and queues later
+  // dialogs, so the session stops accepting commands.
+  dialogsOpen: number;
   // Models the fake registry resolves; anything else resolves to undefined,
   // which is how an unavailable model behaves in production.
   knownModels: Set<string>;
@@ -106,6 +133,8 @@ export function makeHarness(provenance: Provenance = "interactive", acknowledgem
   const thinkingCalls: string[] = [];
   const notifications: NotifyCall[] = [];
   const confirmPrompts: string[] = [];
+  const confirmDetails: string[] = [];
+  const confirmOptions: DialogOptions[] = [];
   const h: Harness = {
     handlers,
     tools,
@@ -115,6 +144,9 @@ export function makeHarness(provenance: Provenance = "interactive", acknowledgem
     thinkingCalls,
     notifications,
     confirmPrompts,
+    confirmDetails,
+    confirmOptions,
+    dialogsOpen: 0,
     knownModels,
     setModelResult: true,
     pi: {
@@ -166,6 +198,9 @@ export function makeHarness(provenance: Provenance = "interactive", acknowledgem
           return knownModels.has(`${provider}/${modelId}`) ? { provider, modelId } : undefined;
         },
       },
+      sessionManager: {
+        getSessionId: () => "01a07000-0000-7000-8000-000000000abc",
+      },
       ui: {
         notify(message, level) {
           notifications.push({ message, level });
@@ -173,16 +208,38 @@ export function makeHarness(provenance: Provenance = "interactive", acknowledgem
         ...(acknowledgement === "absent"
           ? {}
           : {
-              async confirm(message: string) {
-                confirmPrompts.push(message);
+              async confirm(title: string, message: string, options?: DialogOptions) {
+                confirmPrompts.push(title);
+                confirmDetails.push(message);
+                confirmOptions.push({ ...options });
                 if (acknowledgement === "throws") {
                   throw new Error("no terminal to present a dialog on");
                 }
-                if (acknowledgement === "silent") {
-                  // Never settles, exactly like a dialog nobody answers.
-                  return await new Promise<boolean>(() => {});
+                if (acknowledgement === "yes" || acknowledgement === "no") {
+                  return acknowledgement === "yes";
                 }
-                return acknowledgement === "yes";
+
+                // Nobody answers. Settle only on a deadline the fake honours,
+                // exactly as the real dialog does, and count the dialog as open
+                // until then: a refusal that leaves it open is the wedge.
+                h.dialogsOpen += 1;
+                const honoursSignal = acknowledgement !== "ignoresSignal";
+                // The built-in timeout answers with the CURSOR position: index 0
+                // is Yes, index 1 is No. "ignoresDefault" models a build that
+                // ignores initialIndex, so its timeout answers Yes.
+                const timeoutAnswer = acknowledgement === "ignoresDefault" ? true : options?.initialIndex !== 1;
+                return await new Promise<boolean>((resolve) => {
+                  const settle = (answer: boolean) => {
+                    h.dialogsOpen -= 1;
+                    resolve(answer);
+                  };
+                  if (honoursSignal && options?.signal) {
+                    options.signal.addEventListener("abort", () => settle(false), { once: true });
+                  }
+                  if (options?.timeout !== undefined) {
+                    setTimeout(() => settle(timeoutAnswer), options.timeout);
+                  }
+                });
               },
             }),
       },

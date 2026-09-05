@@ -114,13 +114,20 @@ fi
 
 # Case 3: a real terminal ingress must be admitted, or the gate has simply
 # removed the feature. Driven through a pty because that is what makes the
-# runtime report an interactive session, and the extra Enter is the
-# acknowledgement the gate now requires.
+# runtime report an interactive session.
+#
+# The dialog's cursor starts on No (initialIndex 1), so Enter alone DENIES.
+# Answering Yes means moving the cursor and confirming - measured: Up then
+# Enter admits, a bare Enter does not, and Left does nothing. That is
+# deliberate: the default must be the safe answer, because the built-in timeout
+# picks whatever the cursor is on.
 echo "case 3: interactive pty ingress, acknowledged"
 (
   sleep 8
   printf '/role fable\r'
   sleep 4
+  printf '\x1b[A'
+  sleep 1
   printf '\r'
   sleep 4
   printf '\x03'
@@ -157,8 +164,14 @@ echo "case 4: unattended positional CLI message in a pty"
 cli_control=$(tr -d '\000' <"$WORK/tty-cli-control.log" | grep -ac 'Role router: @incident')
 check_seen "positional ingress does reach the handler (ungated role)" "$cli_control"
 
+# After the refusal, a SECOND command must still execute in the same session.
+# That is the assertion the earlier implementation failed: it printed the
+# refusal and left the dialog presented, and the following /role incident never
+# ran. A refusal that strands the session is not a safe failure.
 (
-  sleep 16
+  sleep 12
+  printf '/role incident\r'
+  sleep 6
   printf '\x03'
   sleep 1
   printf '\x03'
@@ -168,8 +181,10 @@ check_seen "positional ingress does reach the handler (ungated role)" "$cli_cont
   >"$WORK/tty-cli.log" 2>&1
 cli_admitted=$(tr -d '\000' <"$WORK/tty-cli.log" | grep -ac 'Role router: @fable')
 cli_refused=$(tr -d '\000' <"$WORK/tty-cli.log" | grep -ac 'not activated: the switch was not acknowledged')
+cli_alive=$(tr -d '\000' <"$WORK/tty-cli.log" | grep -ac 'Role router: @incident')
 check "unacknowledged positional /role fable is refused" 0 "$cli_admitted"
 check_seen "and refused by the acknowledgement window, not by a dead session" "$cli_refused"
+check_seen "and the session still runs the NEXT command (no wedge)" "$cli_alive"
 
 # Case 5: an automated RPC client. This is the ingress that broke a
 # UI-flag-only guard: --mode=rpc gets a real (non-no-op) UI context, so hasUI is

@@ -58,19 +58,47 @@ selector being spent. The mode check alone is not enough: `omp '/role fable'` pa
 interactive startup reports `mode: "tui"` — so an unattended pty invocation cleared check 1
 and switched the model (reproduced on 18.1.10 in a scripted pty with no keystrokes).
 
-Measured: a keystroke resolves `true`, **cancellation** resolves `false`, and plain silence
-**does not resolve at all**. So the wait is bounded here — the dialog is raced against a
-timer that denies, default 60s, overridable with `PI_ROLE_ROUTER_ACK_TIMEOUT_MS` so tests do
-not idle. `confirm`'s own timeout option is unusable: on 18.1.10 the selector's timeout
-picks its **default first option, which is Yes** — a timeout that fails open. A `confirm`
-that throws denies, and a `ctx.ui` with no `confirm` denies.
+The dialog carries **two independent deadlines**, and neither is optional. Measured on
+18.1.10, each in its own pty with nobody answering:
+
+| options | result | session afterwards |
+| --- | --- | --- |
+| `{ signal }`, aborted at 5s | `false` at 5003ms | still accepts commands |
+| `{ timeout: 5000 }` | **`true`** at 5002ms | still accepts commands |
+| `{ timeout: 5, initialIndex: 1 }` | `false` at 7ms | still accepts commands |
+| neither | never resolves | **wedged** |
+
+So the built-in timeout answers with the **cursor position** — Yes unless `initialIndex`
+moves it to No — and `timeout` is in **milliseconds**, which makes a value meant as seconds
+a 5ms window. A bare `{ timeout }` is therefore forbidden here. The switch passes
+`{ timeout, initialIndex: 1, signal }` in one call: if a build ignores `initialIndex` the
+abort still denies, and if it ignores `signal` the No-defaulted timeout still denies. The
+abort fires first and the dialog deadline sits a grace period behind it, so the two cannot
+race for the answer. The window is 60s, overridable with `PI_ROLE_ROUTER_ACK_TIMEOUT_MS`.
+
+The last row is why this is not a detail. An earlier version awaited the dialog with no
+deadline of its own, raced against a timer: it printed a refusal and left the selector
+presented, and a following `/role incident` **never ran**. A refusal that strands the
+session is not a safe failure, and `test/provenance-regression.sh` now asserts the next
+command still executes.
+
+Because the cursor starts on No, **Enter alone denies**; acknowledging takes an explicit
+keystroke (measured: Up then Enter admits). A `confirm` that throws denies, and a `ctx.ui`
+with no `confirm` denies.
+
+**Every gated activation is recorded** to `role-activations.jsonl` in the agent directory,
+naming the session id, the timestamp, the selector and the gate that admitted it. The write
+happens **before** the switch and is a precondition: if it fails, the switch is refused,
+because an activation nobody can attribute is exactly what the record exists to prevent.
 
 **The honest limit, and it is an API limit rather than a design choice.** This proves an
 ingress that *answers*, not a human. The command context exposes `mode` and `hasUI` and
 nothing about the submitter; `ctx.ui` exposes `onTerminalInput`, but a scripted pty produces
 real terminal input too. At this API there is no signal that separates fingers from a
-script, so automation that injects a keystroke still passes. What the gate removes is the
-**unattended** case, which is the actual leak.
+script, so **automation that injects a keystroke still passes**. What the gate removes is the
+**unattended** case, which is the actual leak. It is not "human-selectable": it is a
+terminal composer session plus an answered dialog inside a bounded window, and the residual
+is deliberate keystroke injection.
 
 Neither check is load-bearing on the harness staying as it is. On omp 18.1.10 an
 agent-attributed *task* prompt is delivered to the model as text and is never
@@ -259,7 +287,10 @@ runtime reports as provenance. Five cases:
 3. **interactive pty, acknowledged** — a real terminal answering the confirmation must be
    admitted, or the gate has deleted the feature rather than secured it.
 4. **unattended positional CLI message** — `omp '/role fable'` in a pty with nobody
-   answering. This is the ingress that defeated the mode check on its own.
+   answering. This is the ingress that defeated the mode check on its own, and it also
+   carries the **liveness** assertion: after the refusal a following `/role incident` must
+   still execute. An earlier gate printed the refusal and left the session wedged, which no
+   amount of asserting the refusal could see.
 5. **automated rpc** — the ingress that broke a UI-flag-only gate; refused now, with an
    ungated-role control proving the frame reaches the handler at all.
 

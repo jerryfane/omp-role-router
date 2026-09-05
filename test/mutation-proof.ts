@@ -67,23 +67,43 @@ const MUTANTS: Mutant[] = [
   },
   {
     name: "M10 accept a switch that was never acknowledged",
-    find: "    (answer) => answer === true,",
-    replace: "    () => true,",
+    find: "    return answer === true;",
+    replace: "    return true;",
   },
   {
-    name: "M13 fail OPEN when the acknowledgement window expires",
-    find: "    timer = setTimeout(() => resolve(false), acknowledgementTimeoutMs());",
-    replace: "    timer = setTimeout(() => resolve(true as unknown as false), acknowledgementTimeoutMs());",
+    name: "M13 let the built-in timeout answer with its default (Yes)",
+    find: "      initialIndex: 1,",
+    replace: "      initialIndex: 0,",
   },
   {
-    name: "M14 await the dialog unbounded, so silence hangs instead of denying",
-    find: "    return await Promise.race([answered, denied]);",
-    replace: "    return await answered;",
+    name: "M14 drop the abort, leaving only the dialog's own deadline",
+    find: "      signal: controller.signal,",
+    replace: "      signal: undefined,",
   },
   {
     name: "M15 treat a dialog that cannot be presented as an acknowledgement",
-    find: "    () => false,\n  );",
-    replace: "    () => true,\n  );",
+    find: "  } catch {\n    // A dialog that cannot be presented, or an abort surfaced as a throw, is a\n    // refusal - never an acknowledgement.\n    return false;",
+    replace: "  } catch {\n    return true;",
+  },
+  {
+    name: "M16 never bound the dialog at all, so silence wedges the session",
+    find: "      timeout: windowMs + ACKNOWLEDGEMENT_GRACE_MS,\n      initialIndex: 1,\n      signal: controller.signal,",
+    replace: "      initialIndex: 1,",
+  },
+  {
+    name: "M17 re-resolve the selector after the acknowledgement",
+    find: "    const target = resolved ?? resolveSelector(role);",
+    replace: "    const target = resolveSelector(role);",
+  },
+  {
+    name: "M18 activate without recording the gated activation",
+    find: "          recordGatedActivation(ctx, requested, target);",
+    replace: "          void requested;",
+  },
+  {
+    name: "M19 proceed when the activation cannot be recorded",
+    find: '            `@${requested} not activated: the activation could not be recorded (${String(error)}).`,\n            "error",\n          );\n          return;',
+    replace: '            `@${requested} activation record failed (${String(error)}).`,\n            "error",\n          );',
   },
   {
     name: "M11 fail OPEN when the ui offers no way to acknowledge",
