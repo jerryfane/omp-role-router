@@ -23,8 +23,9 @@ session, with no restart and no lost context.
    message sends, escalation resolution, `systemctl` restart, stop and disable, `rsync`,
    and `npm run build`.
 4. **Restores the default role** when the routed run ends.
-5. **Offers manual control** through a `/role` command, which ends automatic management of
-   the run and switches to any role the ingress is allowed to select.
+5. **Offers manual control** through `/role <name>`, accepting every string-valued key in
+   `modelRoles` without a separate router allowlist. A valid manual selection ends automatic
+   management of the run; an unknown role is refused without ending it.
 
 The two surfaces are deliberately not the same size. `/role` is driven by a person. The
 in-session `session_role` tool, which the model itself can call, is inactive outside a
@@ -33,8 +34,8 @@ model. Widening that set is a separate decision from adding a role.
 
 ### Roles whose quota is scarce are gated on an interactive ingress
 
-`fable` is listed in `INTERACTIVE_ONLY_ROLES`. Selecting a listed role requires **two**
-things, and both fail closed.
+`fable` is listed in `INTERACTIVE_ONLY_ROLES`. Selecting it, with any casing or through an
+alias, requires **two** things, and both fail closed.
 
 **1. A terminal composer session.** Measured on omp 18.1.10:
 
@@ -160,27 +161,26 @@ A `:suffix` on the selector sets the thinking level. Accepted values are `inheri
 
 ### Role names and config keys
 
-The role names are `default`, `checkin`, `incident`, and `fable`. The config key each one
-reads is declared in `ROLE_CONFIG_KEY` and is **not** derived from the role name, because a
-key in an existing config may already be spelled differently — `fable` reads `FABLE`:
+Every string-valued key in `modelRoles` is available through `/role <name>`. The extension
+reads the config on each invocation, so new roles need no router edit or restart:
 
-```ts
-const ROLE_CONFIG_KEY: Record<RoleName, string> = {
-  default: "default",
-  checkin: "checkin",
-  incident: "incident",
-  fable: "FABLE",
-};
+```text
+/role astra
+/role CHILL
+/role default
 ```
 
-Point a role at a differently-spelled key by editing that table rather than by renaming the
-config key, so the mapping stays in the versioned file and a mismatch is a visible edit
-instead of a runtime `Missing modelRoles.<key>`.
+Exact config keys take precedence. Otherwise, names are matched case-insensitively:
+`/role astra` selects `ASTRA`, and `/role fable` selects `FABLE`. If multiple keys differ
+only by casing, use their exact spelling; an ambiguous spelling is refused.
 
-A missing key is reported, not silently absorbed: the switch is refused, the model does not
-move, and the notification names the **config key** it looked for. That is a deliberate
-difference from a fallback — a routing extension that quietly kept the current model would
-be indistinguishable from one that never loaded.
+`/role` without an argument shows the current role. Unknown names are refused with a list
+of configured roles and leave automatic management unchanged. Missing alias targets, alias
+cycles and invalid selectors are errors, never silent fallbacks.
+
+Fable's terminal confirmation and activation record still apply, including when another
+role aliases it. Other roles need no acknowledgement. This does not expand automatic
+check-in/incident routing or the incident-only `session_role` tool.
 
 A value may point at another key with `@`, resolved before the selector is parsed. YAML
 reserves a leading `@`, so an alias value **must be quoted** — `FABLE: "@ASTRA"` is an

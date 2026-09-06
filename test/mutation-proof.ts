@@ -21,19 +21,9 @@ const SRC = join(import.meta.dir, "..", "src", "role-router.ts");
 
 const MUTANTS: Mutant[] = [
   {
-    name: "M1 resolve by role name instead of the mapped config key",
-    find: "let selector = roles[configKey];",
-    replace: "let selector = roles[role];",
-  },
-  {
-    name: "M2 drop fable from ROLE_NAMES",
-    find: '["default", "checkin", "incident", "fable"] as const',
-    replace: '["default", "checkin", "incident"] as const',
-  },
-  {
-    name: "M3 break a mapping whose config key was already lowercase",
-    find: '  incident: "incident",',
-    replace: '  incident: "INCIDENT",',
+    name: "M1 resolve by requested spelling instead of the configured key",
+    find: "let selector = roles[configKey]!;",
+    replace: "let selector = roles[role]!;",
   },
   {
     name: "M4 widen the agent-facing tool enum to accept fable",
@@ -41,14 +31,9 @@ const MUTANTS: Mutant[] = [
     replace: 'pi.zod.enum(["incident", "fable"])',
   },
   {
-    name: "M5 hardcode the /role usage list instead of deriving it",
-    find: 'const ROLE_USAGE = `/role [${ROLE_NAMES.join("|")}]`;',
-    replace: 'const ROLE_USAGE = "/role [default|checkin|incident]";',
-  },
-  {
     name: "M6 stop gating the scarce role on an interactive ingress",
-    find: "const INTERACTIVE_ONLY_ROLES: Partial<Record<RoleName, true>> = {\n  fable: true,\n};",
-    replace: "const INTERACTIVE_ONLY_ROLES: Partial<Record<RoleName, true>> = {};",
+    find: 'const INTERACTIVE_ONLY_ROLES = new Set(["fable"]);',
+    replace: "const INTERACTIVE_ONLY_ROLES = new Set<string>();",
   },
   {
     name: "M7 fail OPEN when the runtime reports no provenance",
@@ -124,11 +109,6 @@ const MUTANTS: Mutant[] = [
     name: "M11 fail OPEN when the ui offers no way to acknowledge",
     find: '  if (!("confirm" in ui) || typeof ui.confirm !== "function") {\n    return false;\n  }',
     replace: '  if (!("confirm" in ui) || typeof ui.confirm !== "function") {\n    return true;\n  }',
-  },
-  {
-    name: "M12 stop validating the requested role name",
-    find: "  return ROLE_NAMES.some((role) => role === value);",
-    replace: "  return value.length > 0;",
   },
 ];
 
