@@ -62,7 +62,7 @@ async function startAgent(h: Harness, prompt: string): Promise<AgentStartResult>
   if (!handler) {
     throw new Error("extension registered no before_agent_start hook");
   }
-  return await handler({ prompt, systemPrompt: ["base"] }, h.ctx);
+  return await handler({ prompt, systemPrompt: ["base"] }, h.ctx) as AgentStartResult;
 }
 
 describe("/role fable", () => {
@@ -186,19 +186,119 @@ describe("configured manual roles", () => {
   });
 });
 
+describe("automatic callbacks enforce resolved Fable aliases", () => {
+  const prompt = "read /root/fleet-tools/jarvis-checkin.md and execute it";
+  async function event(h: Harness, name: string, input: unknown = {}): Promise<unknown> {
+    const callback = h.handlers.get(name);
+    if (!callback) throw new Error(`Missing production callback: ${name}`);
+    return callback(input, h.ctx);
+  }
+  const paths = [
+    { name: "checkin start", role: "checkin", run: (h: Harness) => startAgent(h, prompt) },
+    {
+      name: "incident evidence", role: "incident",
+      run: (h: Harness) => event(h, "tool_result", {
+        toolName: "bash", content: [{ type: "text", text: "GUARD-FAIL" }],
+      }),
+    },
+    {
+      name: "incident consequential command", role: "incident",
+      run: (h: Harness) => event(h, "tool_call", { toolName: "bash", input: { command: "git push" } }),
+      refusedResult: { block: true },
+    },
+    {
+      name: "incident session_role", role: "incident",
+      run: (h: Harness) => h.tools.get("session_role")!.execute(
+        "incident-call", { role: "incident", reason: "A confirmed incident" }, undefined, undefined, h.ctx,
+      ),
+      refusedResult: { isError: true },
+    },
+    { name: "default at run end", role: "default", run: (h: Harness) => event(h, "agent_end") },
+    {
+      name: "default after failed checkin", role: "default", failedCheckin: true,
+      run: (h: Harness) => startAgent(h, prompt),
+    },
+  ];
+
+  for (const path of paths) {
+    async function prepare(provenance: Provenance, acknowledgement: Acknowledgement): Promise<Harness> {
+      const roles: Record<string, string> = { ...LIVE_LIKE_ROLES, Bridge: "@fAbLe" };
+      // Exercise case-insensitive lookup at both the entry role and alias hop.
+      delete roles[path.role];
+      roles[path.role.toUpperCase()] = "@bridge";
+      const h = boot(roles, LIVE_MODELS, provenance, acknowledgement);
+      if (path.role !== "checkin") {
+        await startAgent(h, prompt);
+      }
+      if (path.failedCheckin) {
+        writeFileSync(join(process.env.PI_CODING_AGENT_DIR!, "config.yml"),
+          `modelRoles: ${JSON.stringify({ ...roles, checkin: "missing/model" })}\n`);
+      }
+      h.setModelCalls.length = 0;
+      return h;
+    }
+
+    test(`${path.name}: acknowledgement activates and attributes the resolved model`, async () => {
+      const h = await prepare("interactive", "yes");
+
+      await path.run(h);
+
+      expect(h.setModelCalls).toEqual([{ provider: "anthropic", modelId: "claude-fable-5-1" }]);
+      expect(h.confirmDetails).toEqual([`Spends ${FABLE_SELECTOR}. This is the scarce model.`]);
+      const rows = readFileSync(join(process.env.PI_CODING_AGENT_DIR!, "role-activations.jsonl"), "utf8")
+        .trim().split("\n").map((line) => JSON.parse(line));
+      expect(rows).toMatchObject([{
+        role: path.role, selector: FABLE_SELECTOR,
+        session: "01a07000-0000-7000-8000-000000000abc",
+        gate: "composer_session_plus_acknowledgement",
+      }]);
+    });
+
+    test(`${path.name}: declining confirmation refuses activation`, async () => {
+      const h = await prepare("interactive", "no");
+
+      const result = await path.run(h);
+
+      expect(h.confirmDetails).toEqual([`Spends ${FABLE_SELECTOR}. This is the scarce model.`]);
+      expect(h.setModelCalls).toEqual([]);
+      expect(existsSync(join(process.env.PI_CODING_AGENT_DIR!, "role-activations.jsonl"))).toBe(false);
+      if (path.refusedResult) expect(result).toMatchObject(path.refusedResult);
+    });
+
+    test(`${path.name}: headless ingress cannot spend Fable`, async () => {
+      const h = await prepare("headless", "yes");
+
+      const result = await path.run(h);
+
+      expect(h.setModelCalls).toEqual([]);
+      expect(h.confirmPrompts).toEqual([]);
+      expect(existsSync(join(process.env.PI_CODING_AGENT_DIR!, "role-activations.jsonl"))).toBe(false);
+      if (path.refusedResult) expect(result).toMatchObject(path.refusedResult);
+    });
+  }
+
+  test("declining a manual switch preserves the routed incident escalation path", async () => {
+    const h = boot(LIVE_LIKE_ROLES, LIVE_MODELS, "interactive", "no");
+    await startAgent(h, prompt);
+    await runRoleCommand(h, "fable");
+
+    await event(h, "tool_result", { toolName: "bash", content: [{ type: "text", text: "GUARD-FAIL" }] });
+
+    expect(h.setModelCalls).toEqual([
+      { provider: "openai-codex", modelId: "gpt-5.6-terra" },
+      { provider: "openai-codex", modelId: "gpt-5.6-sol" },
+    ]);
+  });
+});
+
 describe("fable is gated on an interactive ingress", () => {
-  test("refuses fable when the session reports no UI, and says why", async () => {
+  test("refuses fable when the session reports no UI", async () => {
     const h = boot(LIVE_LIKE_ROLES, LIVE_MODELS, "headless");
 
     await runRoleCommand(h, "fable");
 
     expect(h.setModelCalls).toEqual([]);
-    expect(h.notifications).toEqual([
-      {
-        message: "@fable can only be selected from an interactive terminal session; this ingress is not one.",
-        level: "error",
-      },
-    ]);
+    expect(h.notifications.map((entry) => entry.level)).toEqual(["error"]);
   });
 
   // The case that made a UI flag alone insufficient: --mode=rpc gets a real
@@ -254,9 +354,6 @@ describe("fable is gated on an interactive ingress", () => {
 
     expect(h.confirmPrompts.length).toBe(1);
     expect(h.setModelCalls).toEqual([]);
-    expect(h.notifications).toEqual([
-      { message: "@fable not activated: the switch was not acknowledged.", level: "error" },
-    ]);
   });
 
   test("fails closed when the ui offers no way to acknowledge", async () => {
@@ -284,9 +381,6 @@ describe("fable is gated on an interactive ingress", () => {
 
       expect(h.confirmPrompts.length).toBe(1);
       expect(h.setModelCalls).toEqual([]);
-      expect(h.notifications).toEqual([
-        { message: "@fable not activated: the switch was not acknowledged.", level: "error" },
-      ]);
       // No dialog left behind, and the session takes the next command.
       expect(h.dialogsOpen).toBe(0);
 

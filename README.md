@@ -178,9 +178,11 @@ only by casing, use their exact spelling; an ambiguous spelling is refused.
 of configured roles and leave automatic management unchanged. Missing alias targets, alias
 cycles and invalid selectors are errors, never silent fallbacks.
 
-Fable's terminal confirmation and activation record still apply, including when another
-role aliases it. Other roles need no acknowledgement. This does not expand automatic
-check-in/incident routing or the incident-only `session_role` tool.
+Fable's terminal confirmation and activation record apply at the shared model-switching
+point, including aliases reached by automatic check-in, incident escalation, and default
+restoration. An interactive session must acknowledge each gated activation; headless or
+RPC ingress and declined confirmation cannot activate it. Ungated roles remain automatic.
+This does not expand routing triggers or the incident-only `session_role` tool.
 
 A value may point at another key with `@`, resolved before the selector is parsed. YAML
 reserves a leading `@`, so an alias value **must be quoted** — `FABLE: "@ASTRA"` is an
@@ -251,11 +253,16 @@ role and whether the run is managed, which separates those two cases directly.
 bun test
 ```
 
-The suite drives the production entry points — the `before_agent_start` hook and the `/role`
-handler — through a fake `ExtensionAPI` that captures what the extension registers, and it
-points `PI_CODING_AGENT_DIR` at a throwaway `config.yml` so selector resolution runs for
-real. No test calls the internal `activate` or `resolveSelector`; a test that reached inside
+The suite drives the production entry points — `before_agent_start`, `tool_result`,
+`tool_call`, `agent_end`, `session_role.execute`, and `/role` — through a fake
+`ExtensionAPI` that captures what the extension registers. It points
+`PI_CODING_AGENT_DIR` at a throwaway `config.yml` so selector resolution runs for real.
+No test calls the internal `activate` or `resolveSelector`; a test that reached inside
 would pass over a router that never routes.
+
+Automatic alias regressions cover check-in start, both incident hooks, the incident tool,
+and both default-restoration paths. Each exercises acknowledged activation with a durable
+record, declined confirmation, and headless refusal through mixed-case alias chains.
 
 It asserts what each role RESOLVES to, not merely that resolving raised nothing, and it
 includes an unrouted-prompt control. `@oh-my-pi/pi-coding-agent` is not needed to run it:

@@ -14,15 +14,21 @@ export type ModelKey = { provider: string; modelId: string };
 export type AgentStartEvent = { prompt: string; systemPrompt: string[] };
 export type AgentStartResult = { systemPrompt: string[] } | undefined;
 
-// The fake declares one hook signature for every event name. Only
-// before_agent_start is driven by these tests; the extension's other hooks are
-// captured so that registering them cannot be mistaken for calling them.
-export type HookHandler = (event: AgentStartEvent, ctx: unknown) => Promise<AgentStartResult>;
+// The event registry captures callbacks with different runtime signatures.
+// Tests supply the production event shape for each registered entry point.
+export type HookHandler = (event: unknown, ctx: unknown) => Promise<unknown>;
 
 export type FakeZodField = { kind: string; values?: string[] };
 export type ToolSpec = {
   name: string;
   parameters: { kind: string; shape: Record<string, FakeZodField> };
+  execute: (
+    toolCallId: string,
+    params: { role: "incident"; reason: string },
+    signal: unknown,
+    onUpdate: unknown,
+    ctx: unknown,
+  ) => Promise<unknown>;
 };
 export type RoleCommandSpec = {
   description: string;

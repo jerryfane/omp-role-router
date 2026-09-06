@@ -312,15 +312,27 @@ export default function roleRouter(pi: ExtensionAPI) {
     );
   }
 
-  // The target may be supplied by a caller that already resolved it. That is not
-  // an optimisation: an acknowledgement names a selector, and re-reading
-  // config.yml here would let an edit during the dialog activate a DIFFERENT
-  // model than the one that was acknowledged.
-  async function activate(role: string, ctx: ExtensionContext, reason: string, resolved?: RoleTarget): Promise<string> {
-    const target = resolved ?? resolveSelector(role);
+  // Every entry point authorizes the same resolved target before switching.
+  // Keep it fixed across acknowledgement, recording and activation.
+  async function activate(role: string, ctx: ExtensionContext, reason: string): Promise<string> {
+    const target = resolveSelector(role);
     const model = ctx.modelRegistry.find(target.provider, target.modelId);
     if (!model) {
       throw new Error(`Model not found for @${role}: ${target.provider}/${target.modelId}`);
+    }
+
+    if (target.gated) {
+      if (!isComposerSession(ctx)) {
+        throw new Error(`@${role} can only be selected from an interactive terminal session; this ingress is not one.`);
+      }
+      if (!(await isAcknowledged(ctx, role, target.selector))) {
+        throw new Error(`@${role} not activated: the switch was not acknowledged.`);
+      }
+      try {
+        recordGatedActivation(ctx, role, target);
+      } catch (error) {
+        throw new Error(`@${role} not activated: the activation could not be recorded (${String(error)}).`);
+      }
     }
 
     const changed = await pi.setModel(model);
@@ -492,36 +504,11 @@ export default function roleRouter(pi: ExtensionAPI) {
         ctx.ui.notify(`Role router: @${currentRole} (${target.selector}), managed=${managedRun}`, "info");
         return;
       }
-      // Resolve once before the gate: aliases must not bypass Fable's policy,
-      // and config edits during acknowledgement must not change the target.
-      let target: RoleTarget;
       try {
-        target = resolveSelector(requested);
+        await activate(requested, ctx, "manual /role command");
       } catch (error) {
         ctx.ui.notify(`Role router failed: ${String(error)}`, "error");
         return;
-      }
-      if (target.gated) {
-        if (!isComposerSession(ctx)) {
-          ctx.ui.notify(
-            `@${requested} can only be selected from an interactive terminal session; this ingress is not one.`,
-            "error",
-          );
-          return;
-        }
-        if (!(await isAcknowledged(ctx, requested, target.selector))) {
-          ctx.ui.notify(`@${requested} not activated: the switch was not acknowledged.`, "error");
-          return;
-        }
-        try {
-          recordGatedActivation(ctx, requested, target);
-        } catch (error) {
-          ctx.ui.notify(
-            `@${requested} not activated: the activation could not be recorded (${String(error)}).`,
-            "error",
-          );
-          return;
-        }
       }
 
       managedRun = false;
@@ -529,11 +516,6 @@ export default function roleRouter(pi: ExtensionAPI) {
         await setRoleToolActive(false);
       } catch (error) {
         ctx.ui.notify(`Role router tool cleanup failed: ${String(error)}`, "error");
-      }
-      try {
-        await activate(requested, ctx, "manual /role command", target);
-      } catch (error) {
-        ctx.ui.notify(`Role router failed: ${String(error)}`, "error");
       }
     },
   });
