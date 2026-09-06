@@ -16,8 +16,7 @@ const INCIDENT_SELECTOR = "openai-codex/gpt-5.6-sol:high";
 const CHECKIN_SELECTOR = "openai-codex/gpt-5.6-terra:medium";
 const DEFAULT_SELECTOR = "anthropic/claude-opus-5:high";
 
-// Mirrors the shape of the live config: every role key is lowercase except
-// FABLE, which is the mismatch this change exists to resolve.
+// Existing lowercase roles and uppercase user-defined keys share one config.
 const LIVE_LIKE_ROLES: Record<string, string> = {
   default: DEFAULT_SELECTOR,
   checkin: CHECKIN_SELECTOR,
@@ -97,7 +96,7 @@ describe("/role fable", () => {
     expect(h.thinkingCalls).toEqual(["high", "medium", "high"]);
   });
 
-  test("follows @alias indirection through the mapped key", async () => {
+  test("follows @alias indirection through the configured key", async () => {
     const h = boot({ ...LIVE_LIKE_ROLES, FABLE: "@ASTRA", ASTRA: "openai-codex/gpt-6-astra:xhigh" }, [
       ...LIVE_MODELS,
       "openai-codex/gpt-6-astra",
@@ -109,27 +108,81 @@ describe("/role fable", () => {
     expect(h.thinkingCalls).toEqual(["xhigh"]);
   });
 
-  test("names the missing config key, not the role name, when FABLE is absent", async () => {
-    const { FABLE: _absent, ...withoutFable } = LIVE_LIKE_ROLES;
-    const h = boot(withoutFable, LIVE_MODELS);
+});
 
-    await runRoleCommand(h, "fable");
+describe("configured manual roles", () => {
+  test("discovers new roles after registration and accepts their lowercase spelling", async () => {
+    const h = boot(LIVE_LIKE_ROLES, [...LIVE_MODELS, "openai-codex/gpt-6-astra"]);
+    writeAgentConfig({ ...LIVE_LIKE_ROLES, ASTRA: "openai-codex/gpt-6-astra:xhigh" });
 
-    expect(h.setModelCalls).toEqual([]);
-    expect(h.notifications.map((entry) => entry.message).join("\n")).toContain("Missing modelRoles.FABLE");
+    await runRoleCommand(h, "astra");
+
+    expect(h.setModelCalls).toEqual([{ provider: "openai-codex", modelId: "gpt-6-astra" }]);
+    expect(h.thinkingCalls).toEqual(["xhigh"]);
+    expect(h.confirmPrompts).toEqual([]);
   });
 
-  test("rejects the uppercase spelling and an unknown role without switching models", async () => {
+  test("unknown roles are refused without ending automatic management", async () => {
     const h = boot(LIVE_LIKE_ROLES, LIVE_MODELS);
+    await startAgent(h, "read /root/fleet-tools/jarvis-checkin.md and execute it");
+
+    await runRoleCommand(h, "missing");
+
+    expect(h.setModelCalls).toEqual([{ provider: "openai-codex", modelId: "gpt-5.6-terra" }]);
+    expect(h.activeTools).toContain("session_role");
+    expect(h.notifications.at(-1)?.level).toBe("error");
+  });
+
+  test("exact keys win and ambiguous casing is refused", async () => {
+    const h = boot({ Astra: DEFAULT_SELECTOR, ASTRA: INCIDENT_SELECTOR }, LIVE_MODELS);
+
+    await runRoleCommand(h, "astra");
+    expect(h.setModelCalls).toEqual([]);
+    expect(h.notifications.at(-1)?.level).toBe("error");
+    await runRoleCommand(h, "Astra");
+    await runRoleCommand(h, "ASTRA");
+    expect(h.setModelCalls).toEqual([
+      { provider: "anthropic", modelId: "claude-opus-5" },
+      { provider: "openai-codex", modelId: "gpt-5.6-sol" },
+    ]);
+  });
+
+  test("uppercase and aliased Fable cannot bypass the gate", async () => {
+    const h = boot({ ...LIVE_LIKE_ROLES, scarce: "@FaBlE" }, LIVE_MODELS, "headless");
 
     await runRoleCommand(h, "FABLE");
-    await runRoleCommand(h, "sonnet");
-
+    await runRoleCommand(h, "scarce");
     expect(h.setModelCalls).toEqual([]);
-    expect(h.notifications).toEqual([
-      { message: "Usage: /role [default|checkin|incident|fable]", level: "error" },
-      { message: "Usage: /role [default|checkin|incident|fable]", level: "error" },
-    ]);
+    expect(h.notifications.map((entry) => entry.level)).toEqual(["error", "error"]);
+  });
+
+  test("an acknowledged alias to Fable still switches and records its selector", async () => {
+    const h = boot({ ...LIVE_LIKE_ROLES, scarce: "@FABLE" }, LIVE_MODELS);
+
+    await runRoleCommand(h, "scarce");
+
+    expect(h.setModelCalls).toEqual([{ provider: "anthropic", modelId: "claude-fable-5-1" }]);
+    const rows = readFileSync(join(process.env.PI_CODING_AGENT_DIR!, "role-activations.jsonl"), "utf8")
+      .trim().split("\n").map((line) => JSON.parse(line));
+    expect(rows).toMatchObject([{ role: "scarce", selector: FABLE_SELECTOR }]);
+  });
+
+  test("cyclic and dangling aliases are refused", async () => {
+    const h = boot({ a: "@B", B: "@a", dangling: "@missing" }, LIVE_MODELS);
+
+    await runRoleCommand(h, "a");
+    await runRoleCommand(h, "dangling");
+    expect(h.setModelCalls).toEqual([]);
+    expect(h.notifications.map((entry) => entry.level)).toEqual(["error", "error"]);
+  });
+
+  test("prototype names are roles only when explicitly configured", async () => {
+    const h = boot({ ...LIVE_LIKE_ROLES, ["__proto__"]: INCIDENT_SELECTOR }, LIVE_MODELS);
+
+    await runRoleCommand(h, "constructor");
+    expect(h.setModelCalls).toEqual([]);
+    await runRoleCommand(h, "__proto__");
+    expect(h.setModelCalls).toEqual([{ provider: "openai-codex", modelId: "gpt-5.6-sol" }]);
   });
 });
 

@@ -4,34 +4,8 @@ import { join } from "node:path";
 import { YAML } from "bun";
 import type { ExtensionAPI, ExtensionContext, ToolResultEvent } from "@oh-my-pi/pi-coding-agent";
 
-const ROLE_NAMES = ["default", "checkin", "incident", "fable"] as const;
-type RoleName = (typeof ROLE_NAMES)[number];
-
-// Role names are lowercase by convention; the modelRoles keys in config.yml are
-// not, so the mapping is declared here rather than inferred. resolveSelector
-// looks up the mapped key, never the role name, so a rename on either side is a
-// visible edit to this table instead of a runtime "Missing modelRoles.x".
-const ROLE_CONFIG_KEY: Record<RoleName, string> = {
-  default: "default",
-  checkin: "checkin",
-  incident: "incident",
-  fable: "FABLE",
-};
-
-// Derived so the /role usage text cannot drift from the accepted set.
-const ROLE_USAGE = `/role [${ROLE_NAMES.join("|")}]`;
-
-// Type guard so `requested` narrows to RoleName for the guard and for activate.
-function isRoleName(value: string): value is RoleName {
-  return ROLE_NAMES.some((role) => role === value);
-}
-
-// Roles that may be selected ONLY from an interactive session, because the
-// quota behind them is scarce enough that an unattended switch is a leak.
-// Everything not listed here is selectable wherever /role is.
-const INTERACTIVE_ONLY_ROLES: Partial<Record<RoleName, true>> = {
-  fable: true,
-};
+// Manual roles come from modelRoles; only the scarce-role policy is fixed here.
+const INTERACTIVE_ONLY_ROLES = new Set(["fable"]);
 
 // Ingress checks for a gated role. Both must hold, and both fail CLOSED.
 //
@@ -98,7 +72,7 @@ function acknowledgementWindowMs(): number {
 // the two deadlines cannot race for the answer.
 const ACKNOWLEDGEMENT_GRACE_MS = 500;
 
-async function isAcknowledged(ctx: ExtensionContext, role: RoleName, selector: string): Promise<boolean> {
+async function isAcknowledged(ctx: ExtensionContext, role: string, selector: string): Promise<boolean> {
   const ui = ctx.ui;
   if (!("confirm" in ui) || typeof ui.confirm !== "function") {
     return false;
@@ -154,7 +128,7 @@ function sessionIdOf(ctx: ExtensionContext): string {
   throw new Error("the session could not be identified, so the activation would not be attributable");
 }
 
-function recordGatedActivation(ctx: ExtensionContext, role: RoleName, target: RoleTarget): void {
+function recordGatedActivation(ctx: ExtensionContext, role: string, target: RoleTarget): void {
   const row = {
     ts: new Date().toISOString(),
     event: "gated_role_activated",
@@ -246,7 +220,7 @@ function loadModelRoles(): Record<string, string> {
     return {};
   }
 
-  const roles: Record<string, string> = {};
+  const roles: Record<string, string> = Object.create(null);
   for (const [name, selector] of Object.entries(candidate)) {
     if (typeof selector === "string") {
       roles[name] = selector;
@@ -255,26 +229,43 @@ function loadModelRoles(): Record<string, string> {
   return roles;
 }
 
-// A resolved role: the model to switch to plus the selector text it came from.
-type RoleTarget = { provider: string; modelId: string; thinking?: ThinkingLevel; selector: string };
+// Prefer an exact config key; accept other casing only when it is unambiguous.
+function resolveRoleKey(roles: Record<string, string>, role: string): string {
+  if (Object.hasOwn(roles, role)) {
+    return role;
+  }
+  const matches = Object.keys(roles).filter((key) => key.toLowerCase() === role.toLowerCase());
+  if (matches.length === 1) {
+    return matches[0]!;
+  }
+  if (matches.length > 1) {
+    throw new Error(`Ambiguous role @${role}; use an exact config key: ${matches.join(", ")}`);
+  }
+  throw new Error(`Unknown role @${role}. Configured roles: ${Object.keys(roles).join(", ") || "(none)"}`);
+}
 
-function resolveSelector(role: RoleName): RoleTarget {
+// Carry both the selector and its gate through the dialog without re-reading config.
+type RoleTarget = { provider: string; modelId: string; thinking?: ThinkingLevel; selector: string; gated: boolean };
+
+function resolveSelector(role: string): RoleTarget {
   const roles = loadModelRoles();
-  const configKey = ROLE_CONFIG_KEY[role];
-  let selector = roles[configKey];
+  let configKey = resolveRoleKey(roles, role);
+  let selector = roles[configKey]!;
   const seen = new Set<string>();
+  let gated = false;
 
-  while (typeof selector === "string" && selector.startsWith("@")) {
-    const alias = selector.slice(1).split(":", 1)[0];
-    if (!alias || seen.has(alias)) {
+  while (true) {
+    if (seen.has(configKey)) {
       throw new Error(`Invalid model role alias for @${role}`);
     }
-    seen.add(alias);
-    selector = roles[alias];
-  }
-
-  if (typeof selector !== "string") {
-    throw new Error(`Missing modelRoles.${configKey} in ${join(agentDir(), "config.yml")}`);
+    seen.add(configKey);
+    gated ||= INTERACTIVE_ONLY_ROLES.has(configKey.toLowerCase());
+    if (!selector.startsWith("@")) {
+      break;
+    }
+    const alias = selector.slice(1).split(":", 1)[0]!;
+    configKey = resolveRoleKey(roles, alias);
+    selector = roles[configKey]!;
   }
 
   const slash = selector.indexOf("/");
@@ -296,6 +287,7 @@ function resolveSelector(role: RoleName): RoleTarget {
     modelId,
     thinking,
     selector,
+    gated,
   };
 }
 
@@ -305,7 +297,7 @@ function toolText(event: ToolResultEvent): string {
 
 
 export default function roleRouter(pi: ExtensionAPI) {
-  let currentRole: RoleName = "default";
+  let currentRole = "default";
   let managedRun = false;
   let managedSeat = "";
 
@@ -324,7 +316,7 @@ export default function roleRouter(pi: ExtensionAPI) {
   // an optimisation: an acknowledgement names a selector, and re-reading
   // config.yml here would let an edit during the dialog activate a DIFFERENT
   // model than the one that was acknowledged.
-  async function activate(role: RoleName, ctx: ExtensionContext, reason: string, resolved?: RoleTarget): Promise<string> {
+  async function activate(role: string, ctx: ExtensionContext, reason: string, resolved?: RoleTarget): Promise<string> {
     const target = resolved ?? resolveSelector(role);
     const model = ctx.modelRegistry.find(target.provider, target.modelId);
     if (!model) {
@@ -492,7 +484,7 @@ export default function roleRouter(pi: ExtensionAPI) {
   });
 
   pi.registerCommand("role", {
-    description: `Show or manually switch the current OMP model role: ${ROLE_USAGE}`,
+    description: "Show the current role or switch to any configured modelRoles key: /role <name>",
     handler: async (args, ctx) => {
       const requested = args.trim();
       if (!requested) {
@@ -500,29 +492,21 @@ export default function roleRouter(pi: ExtensionAPI) {
         ctx.ui.notify(`Role router: @${currentRole} (${target.selector}), managed=${managedRun}`, "info");
         return;
       }
-      if (!isRoleName(requested)) {
-        ctx.ui.notify(`Usage: ${ROLE_USAGE}`, "error");
+      // Resolve once before the gate: aliases must not bypass Fable's policy,
+      // and config edits during acknowledgement must not change the target.
+      let target: RoleTarget;
+      try {
+        target = resolveSelector(requested);
+      } catch (error) {
+        ctx.ui.notify(`Role router failed: ${String(error)}`, "error");
         return;
       }
-      // Resolved ONCE here, then carried through the acknowledgement, the
-      // record and the activation. Re-resolving after the dialog would let an
-      // edit during the window switch to a model the human never saw.
-      let acknowledged: RoleTarget | undefined;
-      if (INTERACTIVE_ONLY_ROLES[requested]) {
+      if (target.gated) {
         if (!isComposerSession(ctx)) {
           ctx.ui.notify(
             `@${requested} can only be selected from an interactive terminal session; this ingress is not one.`,
             "error",
           );
-          return;
-        }
-        // Resolved before the dialog so a misconfigured role fails without
-        // presenting one, and so the dialog can name the model being spent.
-        let target: RoleTarget;
-        try {
-          target = resolveSelector(requested);
-        } catch (error) {
-          ctx.ui.notify(`Role router failed: ${String(error)}`, "error");
           return;
         }
         if (!(await isAcknowledged(ctx, requested, target.selector))) {
@@ -538,7 +522,6 @@ export default function roleRouter(pi: ExtensionAPI) {
           );
           return;
         }
-        acknowledged = target;
       }
 
       managedRun = false;
@@ -548,7 +531,7 @@ export default function roleRouter(pi: ExtensionAPI) {
         ctx.ui.notify(`Role router tool cleanup failed: ${String(error)}`, "error");
       }
       try {
-        await activate(requested, ctx, "manual /role command", acknowledged);
+        await activate(requested, ctx, "manual /role command", target);
       } catch (error) {
         ctx.ui.notify(`Role router failed: ${String(error)}`, "error");
       }
